@@ -1,0 +1,20 @@
+# Environment
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+venv/
+*.egg-info/
+
+# Artifacts & logs
+LLM_base/artifacts/
+logs/
+
+# Large install files
+Miniconda3-latest-Linux-x86_64.sh
+google-chrome-stable_current_amd64.deb
+
+# OS
+.DS_Store
