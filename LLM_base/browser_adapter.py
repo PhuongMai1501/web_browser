@@ -10,6 +10,8 @@ import platform
 from pathlib import Path
 from urllib.parse import urlparse
 
+_BROWSER_TIMEOUT_S = int(os.getenv("BROWSER_TIMEOUT", "30"))
+
 
 ARTIFACTS_DIR = Path(__file__).parent / "artifacts"
 ARTIFACTS_DIR.mkdir(exist_ok=True)
@@ -18,10 +20,26 @@ ARTIFACTS_DIR.mkdir(exist_ok=True)
 _REF_PATTERN = re.compile(r"^e\d+$")
 
 # Domain allowlist cho open_url — chỉ điều hướng đến các domain tin cậy
-_ALLOWED_DOMAINS = frozenset({
+_DEFAULT_ALLOWED_DOMAINS = frozenset({
     "fpt.net", "microsoftonline.com", "microsoft.com",
     "live.com", "office.com", "sharepoint.com",
 })
+
+# Mutable override — được generic_runner set khi scenario khai báo
+# allowed_domains, reset sau khi job xong. Worker đơn luồng → không race.
+_ALLOWED_DOMAINS: frozenset = _DEFAULT_ALLOWED_DOMAINS
+
+
+def set_allowed_domains(domains) -> None:
+    """Override allowlist cho scenario hiện tại. Nhớ reset khi xong."""
+    global _ALLOWED_DOMAINS
+    _ALLOWED_DOMAINS = frozenset(d.strip().lower() for d in domains if d)
+
+
+def reset_allowed_domains() -> None:
+    """Khôi phục allowlist về default."""
+    global _ALLOWED_DOMAINS
+    _ALLOWED_DOMAINS = _DEFAULT_ALLOWED_DOMAINS
 
 
 def _validate_ref(ref: str) -> None:
@@ -49,7 +67,7 @@ def _validate_url_domain(url: str) -> None:
         raise ValueError(f"URL không hợp lệ: '{url}'") from exc
 
 
-def _run(args: list[str], timeout: int = 30) -> str:
+def _run(args: list[str], timeout: int = _BROWSER_TIMEOUT_S) -> str:
     """Chạy lệnh agent-browser và trả về stdout.
     Dùng shell=False với list args để tránh shell injection.
     Trên Windows dùng cmd /c để tương thích với .cmd file.
@@ -134,7 +152,7 @@ def page_contains_any(texts: tuple[str, ...]) -> bool:
 
 def take_snapshot() -> str:
     """Lấy accessibility tree snapshot, bổ sung metadata và inject error elements nếu có."""
-    raw = _run(["snapshot", "-i"], timeout=30)
+    raw = _run(["snapshot", "-i"])
     enriched = _enrich_snapshot_with_dom_hints(raw)
     return _inject_page_errors(enriched)
 
@@ -322,7 +340,7 @@ def take_screenshot(save_path: str | None = None) -> tuple[str, str]:
     if save_path is None:
         save_path = str(ARTIFACTS_DIR / "screenshot.png")
 
-    _run(["screenshot", save_path], timeout=30)
+    _run(["screenshot", save_path])
 
     with open(save_path, "rb") as f:
         b64 = base64.b64encode(f.read()).decode("utf-8")
@@ -340,10 +358,10 @@ def take_annotated_screenshot(save_path: str | None = None) -> tuple[str, str]:
         save_path = str(ARTIFACTS_DIR / "screenshot_annotated.png")
 
     try:
-        _run(["screenshot", "--annotate", save_path], timeout=30)
+        _run(["screenshot", "--annotate", save_path])
     except Exception:
         # Fallback: chụp screenshot thường nếu --annotate không hỗ trợ
-        _run(["screenshot", save_path], timeout=30)
+        _run(["screenshot", save_path])
 
     with open(save_path, "rb") as f:
         b64 = base64.b64encode(f.read()).decode("utf-8")

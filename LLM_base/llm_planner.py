@@ -3,11 +3,15 @@ llm_planner.py - Gọi OpenAI GPT-4o mini với vision để quyết định bro
 """
 
 import json
+import os
 import re
 import time
 from openai import OpenAI, RateLimitError
 from prompts import SYSTEM_PROMPT, build_user_prompt, build_retry_prompt, build_visual_fallback_prompt, build_history_prompt
 
+_LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4o-mini")
+_LLM_TIMEOUT_S = int(os.getenv("LLM_TIMEOUT", "60"))
+_LLM_MAX_RETRIES = int(os.getenv("LLM_MAX_RETRIES", "3"))
 _RETRY_DELAYS = [1, 3, 8]  # seconds, exponential backoff khi gặp 429
 
 _VALID_ACTIONS = {"click", "type", "wait", "done", "ask"}
@@ -86,6 +90,13 @@ def _sanitize_content(user_content: list) -> list:
     return result
 
 
+def _compose_system(extra: str) -> str:
+    """Nối SYSTEM_PROMPT chung với phần scenario-specific (nếu có)."""
+    if not extra:
+        return SYSTEM_PROMPT
+    return f"{SYSTEM_PROMPT}\n\n--- SCENARIO-SPECIFIC ---\n{extra.strip()}"
+
+
 def _call_llm(client: OpenAI, system: str, user_content: list) -> tuple[dict, str, str]:
     """
     Gọi API và trả về (action_dict, raw_response_text, prompt_text).
@@ -99,7 +110,7 @@ def _call_llm(client: OpenAI, system: str, user_content: list) -> tuple[dict, st
             time.sleep(_RETRY_DELAYS[attempt - 1])
         try:
             response = client.chat.completions.create(
-                model="gpt-5.4-nano",
+                model=_LLM_MODEL,
                 messages=[
                     {"role": "system", "content": _sanitize(system)},
                     {"role": "user", "content": clean_content},
@@ -107,6 +118,7 @@ def _call_llm(client: OpenAI, system: str, user_content: list) -> tuple[dict, st
                 response_format={"type": "json_object"},
                 max_tokens=512,
                 temperature=0.1,
+                timeout=_LLM_TIMEOUT_S,
             )
             raw = response.choices[0].message.content
             action = json.loads(raw)
@@ -143,6 +155,7 @@ def decide_action_visual_fallback(
     api_key: str,
     step: int = 1,
     annotated_b64: str = "",
+    system_prompt_extra: str = "",
 ) -> tuple[dict, str, str]:
     """
     Fallback khi element không có mô tả — gửi fresh snapshot + ảnh để LLM xác nhận
@@ -178,7 +191,7 @@ def decide_action_visual_fallback(
             }
         )
 
-    return _call_llm(client, SYSTEM_PROMPT, user_content)
+    return _call_llm(client, _compose_system(system_prompt_extra), user_content)
 
 
 def decide_action_autonomous(
@@ -188,6 +201,7 @@ def decide_action_autonomous(
     api_key: str,
     step: int = 1,
     context: dict | None = None,
+    system_prompt_extra: str = "",
 ) -> tuple[dict, str, str]:
     """
     Gọi LLM với lịch sử hành động đầy đủ — autonomous mode.
@@ -200,7 +214,7 @@ def decide_action_autonomous(
     user_content = [
         {"type": "text", "text": build_history_prompt(goal, history, snapshot, step, context)}
     ]
-    return _call_llm(client, SYSTEM_PROMPT, user_content)
+    return _call_llm(client, _compose_system(system_prompt_extra), user_content)
 
 
 def decide_action_retry(
@@ -209,6 +223,7 @@ def decide_action_retry(
     invalid_ref: str,
     api_key: str,
     step: int = 1,
+    system_prompt_extra: str = "",
 ) -> tuple[dict, str, str]:
     """
     Retry khi LLM trả về ref không hợp lệ — text only, không gửi ảnh.
@@ -220,4 +235,4 @@ def decide_action_retry(
     user_content = [
         {"type": "text", "text": build_retry_prompt(goal, snapshot, invalid_ref, step)}
     ]
-    return _call_llm(client, SYSTEM_PROMPT, user_content)
+    return _call_llm(client, _compose_system(system_prompt_extra), user_content)

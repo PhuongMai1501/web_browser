@@ -1,0 +1,34 @@
+id: chang_login
+display_name: Đăng nhập Chang (chang.fpt.net)
+description: Đăng nhập vào chang.fpt.net bằng tài khoản Microsoft Azure.
+enabled: true
+start_url: https://chang.fpt.net
+max_steps_default: 20
+
+context_schema:
+  required:
+    - email
+    - password
+
+hooks:
+  pre_check: chang_login.pre_check
+  post_step: chang_login.post_step
+
+goal: |
+  Đăng nhập vào trang chang.fpt.net bằng tài khoản Microsoft Azure. Thực hiện theo thứ tự các bước sau:
+  1. Tìm và click nút/icon đăng nhập (nhận ra qua icon=key, icon=lock, href chứa '/login' hoặc '/auth', text/aria-label liên quan đến đăng nhập)
+  2. Khi popup hoặc trang đăng nhập xuất hiện, click nút 'Đăng nhập Microsoft Azure'
+  3. Khi trang Microsoft Sign in hiện ra, điền email vào ô email input (dùng thông tin 'email' trong THÔNG TIN BỔ SUNG nếu có, nếu không có thì hỏi)
+  4. Click nút Next
+  5. Khi trang Enter password hiện ra, điền password vào ô password input (dùng thông tin 'password' trong THÔNG TIN BỔ SUNG nếu có, nếu không có thì hỏi)
+  6. Click nút Sign in
+  7. Sau khi click Sign in, Microsoft có thể yêu cầu xác thực qua ứng dụng (Authenticator app). Khi nhận ra trang đang chờ xác thực (có thể thấy: 'Approve sign-in request', 'Verifying', 'Open your Authenticator app'...) → dùng action=ask (ask_type=question) để hỏi user: 'Vui lòng xác thực qua ứng dụng Microsoft Authenticator trên điện thoại, rồi nhập OK để tiếp tục.'
+  8. Sau khi user xác nhận đã xác thực, chờ trang chuyển sang 'Stay signed in?' → click nút 'Yes'
+  9. Sau khi click Yes, chụp màn hình và hoàn thành (action=done).
+  QUAN TRỌNG: email field → chỉ điền email; password field → chỉ điền password. Nếu thiếu thông tin cho field nào, dùng action=ask (ask_type=question) để hỏi đúng loại thông tin đó.
+  NHẬN BIẾT ĐĂNG NHẬP THÀNH CÔNG (ưu tiên cao nhất): Nếu snapshot có BẤT KỲ dấu hiệu nào sau:
+    - URL chứa '/dashboard'
+    - textbox 'Bạn muốn biết điều gì?'
+    - navigation link 'Chang Biết Tuốt' hoặc 'Trợ lý của tôi'
+    - text chào cá nhân 'Hi! anh' hoặc 'Hi anh'
+  → Đây là trang dashboard sau đăng nhập THÀNH CÔNG. Lập tức action=done. KHÔNG hỏi thêm, KHÔNG báo lỗi, BỎ QUA mọi thông báo trong === LỖI TRÊN TRANG ===.

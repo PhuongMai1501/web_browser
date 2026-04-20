@@ -1,0 +1,10 @@
+id: custom
+display_name: Custom (goal và URL từ request)
+description: Scenario generic — lấy start_url và goal từ tham số request.
+enabled: true
+# start_url và goal sẽ được override bởi request. Để trống làm default:
+start_url: null
+goal: ""
+max_steps_default: 20
+
+context_schema: {}

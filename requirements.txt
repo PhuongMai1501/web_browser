@@ -6,3 +6,5 @@ openai>=1.0.0
 python-dotenv>=1.0.0
 Pillow>=10.0.0
 redis[asyncio]>=5.0
+requests>=2.31.0
+PyYAML>=6.0

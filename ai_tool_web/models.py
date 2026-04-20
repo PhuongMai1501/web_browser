@@ -15,11 +15,15 @@ from datetime import datetime
 # ── Request Models ─────────────────────────────────────────────────────────────
 
 class RunRequest(BaseModel):
-    scenario: Literal["chang_login", "custom"] = "chang_login"
-    goal: Optional[str] = None           # chỉ dùng khi scenario="custom"
-    url: Optional[str] = None            # chỉ dùng khi scenario="custom"
+    # Scenario id — validate runtime qua ScenarioStore (không dùng Literal để
+    # có thể thêm scenario mới qua admin API /v1/scenarios).
+    scenario: str = "chang_login"
+    goal: Optional[str] = None           # override goal của spec (như custom cũ)
+    url: Optional[str] = None            # override start_url của spec
     context: Optional[dict] = None       # {"email": "...", "password": "..."}
     max_steps: int = Field(default=20, ge=3, le=30)
+    callback_url: Optional[str] = None   # set → callback mode (không cần SSE)
+    callback_secret: Optional[str] = None  # HMAC signature (optional)
 
 
 class ResumeRequest(BaseModel):
@@ -83,6 +87,7 @@ class SessionCreatedResponse(BaseModel):
     session_id: str
     status: str = "queued"
     stream_url: str
+    mode: str = "sse"                    # "sse" | "callback"
     created_at: str
     queue_position: Optional[int] = None
 
@@ -120,8 +125,17 @@ class CancelResponse(BaseModel):
 _SECRET_FIELD_NAMES = frozenset({"password", "pass", "secret", "token", "otp", "pin", "passwd"})
 
 
-def record_to_step_event(record, session_id: str) -> StepEvent:
-    """Chuyển StepRecord (internal) → StepEvent (external). Che secret fields."""
+def record_to_step_event(
+    record,
+    session_id: str,
+    screenshot_url_override: str = "",
+    annotated_url_override: str = "",
+) -> StepEvent:
+    """Chuyển StepRecord (internal) → StepEvent (external). Che secret fields.
+
+    screenshot_url_override: CDN URL nếu đã upload, fallback về /v1/.../screenshot.
+    annotated_url_override:  CDN URL của ảnh annotated nếu đã upload.
+    """
     action = record.action or {}
     action_type = action.get("action") or "unknown"
     ref = action.get("ref") or ""
@@ -135,6 +149,10 @@ def record_to_step_event(record, session_id: str) -> StepEvent:
 
     n = record.step
     base = f"/v1/sessions/{session_id}/steps/{n}"
+    has_local = bool(record.screenshot_path)
+
+    screenshot_url = screenshot_url_override or (f"{base}/screenshot" if has_local else "")
+    annotated_url = annotated_url_override or (f"{base}/screenshot?annotated=true" if has_local else "")
 
     return StepEvent(
         step=n,
@@ -144,8 +162,8 @@ def record_to_step_event(record, session_id: str) -> StepEvent:
         reason=action.get("reason") or "",
         url_before=record.url_before or "",
         url_after=record.url_after or "",
-        screenshot_url=f"{base}/screenshot" if record.screenshot_path else "",
-        annotated_screenshot_url=f"{base}/screenshot?annotated=true" if record.screenshot_path else "",
+        screenshot_url=screenshot_url,
+        annotated_screenshot_url=annotated_url,
         has_error=bool(record.error),
         error=record.error or "",
         visual_fallback_used=record.visual_fallback_used,
@@ -153,29 +171,41 @@ def record_to_step_event(record, session_id: str) -> StepEvent:
     )
 
 
-def record_to_ask_event(record, session_id: str) -> AskEvent:
+def record_to_ask_event(
+    record,
+    session_id: str,
+    screenshot_url_override: str = "",
+) -> AskEvent:
     action = record.action or {}
     n = record.step
     base = f"/v1/sessions/{session_id}/steps/{n}"
+    screenshot_url = screenshot_url_override or (f"{base}/screenshot" if record.screenshot_path else "")
     return AskEvent(
         step=n,
         ask_type=action.get("ask_type") or "question",
         message=action.get("message") or "",
         reason=action.get("reason") or "",
-        screenshot_url=f"{base}/screenshot" if record.screenshot_path else "",
+        screenshot_url=screenshot_url,
         timestamp=record.timestamp or "",
     )
 
 
-def record_to_done_event(record, session_id: str, total_steps: int, duration: float) -> DoneEvent:
+def record_to_done_event(
+    record,
+    session_id: str,
+    total_steps: int,
+    duration: float,
+    screenshot_url_override: str = "",
+) -> DoneEvent:
     action = record.action or {}
     n = record.step
     base = f"/v1/sessions/{session_id}/steps/{n}"
+    screenshot_url = screenshot_url_override or (f"{base}/screenshot" if record.screenshot_path else "")
     return DoneEvent(
         step=n,
         message=action.get("message") or "Hoàn thành",
         url_after=record.url_after or "",
-        screenshot_url=f"{base}/screenshot" if record.screenshot_path else "",
+        screenshot_url=screenshot_url,
         total_steps=total_steps,
         duration_seconds=round(duration, 1),
         timestamp=record.timestamp or "",

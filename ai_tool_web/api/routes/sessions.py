@@ -6,6 +6,8 @@ from fastapi import APIRouter, HTTPException
 
 from config import MAX_STEPS_CAP, MIN_STEPS
 from models import RunRequest, SessionCreatedResponse, SessionStatusResponse
+from services import scenario_service
+from services.scenario_service import ContextValidationError
 from store import job_queue, session_store
 from store.redis_client import get_async_redis
 
@@ -23,6 +25,18 @@ async def create_session(req: RunRequest):
     if not api_key:
         raise HTTPException(500, detail="OPENAI_API_KEY not set")
 
+    # Load + validate spec tại thời điểm enqueue; embed snapshot để job
+    # không bị ảnh hưởng nếu admin sửa spec giữa chừng.
+    spec = await scenario_service.get_async(redis, req.scenario)
+    if spec is None:
+        raise HTTPException(404, detail=f"Scenario '{req.scenario}' không tồn tại")
+    if not spec.enabled:
+        raise HTTPException(409, detail=f"Scenario '{req.scenario}' đang bị disabled")
+    try:
+        scenario_service.validate_context(spec, req.context)
+    except ContextValidationError as e:
+        raise HTTPException(422, detail=str(e))
+
     max_steps = max(MIN_STEPS, min(req.max_steps, MAX_STEPS_CAP))
     session_id = str(uuid.uuid4())
 
@@ -32,7 +46,16 @@ async def create_session(req: RunRequest):
         "goal": req.goal,
         "url": req.url,
         "max_steps": max_steps,
+        "spec_snapshot": spec.model_dump(mode="json"),
     }
+
+    # Callback mode: lưu callback config vào scenario_config để worker đọc
+    mode = "sse"
+    if req.callback_url:
+        scenario_config["callback_url"] = req.callback_url
+        if req.callback_secret:
+            scenario_config["callback_secret"] = req.callback_secret
+        mode = "callback"
 
     await session_store.create_async(
         redis,
@@ -47,6 +70,7 @@ async def create_session(req: RunRequest):
         session_id=session_id,
         status="queued",
         stream_url=f"/v1/sessions/{session_id}/stream",
+        mode=mode,
         created_at="",   # filled by session_store; return minimal info
         queue_position=q_pos,
     )

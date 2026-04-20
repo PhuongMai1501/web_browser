@@ -6,7 +6,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CONDA_ENV="/root/miniconda3/envs/tool_web"
+CONDA_ENV="/root/miniconda3/envs/browser_local"
 cd "$SCRIPT_DIR"
 
 COUNT="${1:-1}"

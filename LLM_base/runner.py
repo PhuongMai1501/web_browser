@@ -3,6 +3,7 @@ runner.py - Orchestrator: vòng lặp agent điều khiển browser bằng LLM.
 """
 
 import logging
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import Generator
@@ -12,6 +13,7 @@ import llm_planner as planner
 from state import StepRecord, SessionState
 
 _BASE_ARTIFACTS = Path(__file__).parent / "artifacts"
+_MAX_SCREENSHOTS = int(os.getenv("MAX_SCREENSHOTS_RETAIN", "10"))
 _logger = logging.getLogger(__name__)
 
 # Secret keys cần mask khi lưu log
@@ -37,6 +39,17 @@ def _mask_prompt_secrets(prompt: str, context: dict | None) -> str:
         if k.lower() in _SECRET_KEYS and v and len(str(v)) > 2:
             masked = masked.replace(str(v), "***")
     return masked
+
+
+def _cleanup_old_screenshots(run_dir: Path) -> None:
+    """Xóa screenshot PNG cũ, giữ max _MAX_SCREENSHOTS ảnh gần nhất."""
+    try:
+        pngs = sorted(run_dir.glob("*.png"), key=lambda p: p.stat().st_mtime)
+        if len(pngs) > _MAX_SCREENSHOTS:
+            for f in pngs[:-_MAX_SCREENSHOTS]:
+                f.unlink(missing_ok=True)
+    except Exception as e:
+        _logger.debug("Screenshot cleanup failed: %s", e)
 
 
 def _make_run_dir() -> Path:
@@ -296,6 +309,7 @@ def run_agent(
             session.save_visual_fallback_log(vfb_log, run_dir)
     except Exception:
         pass
+    _cleanup_old_screenshots(run_dir)
 
     return session
 
@@ -307,6 +321,8 @@ def run_agent_autonomous(
     max_steps: int = 20,
     max_retries: int = 3,
     session_id: str = "",
+    system_prompt_extra: str = "",
+    allowed_domains: list[str] | None = None,
 ) -> Generator[StepRecord, None, SessionState]:
     """
     Autonomous agent với memory — LLM tự suy luận đa bước từ lịch sử.
@@ -319,7 +335,15 @@ def run_agent_autonomous(
         max_steps: Số bước tối đa
         max_retries: Số lần retry khi ref không hợp lệ trong 1 step
         session_id: ID của session để ghi vào log
+        system_prompt_extra: Text append vào SYSTEM_PROMPT cho scenario này
+        allowed_domains: Override domain allowlist của browser_adapter (None → mặc định)
     """
+    # Override allowlist nếu scenario khai báo; reset khi kết thúc.
+    _domain_override_set = False
+    if allowed_domains:
+        browser.set_allowed_domains(allowed_domains)
+        _domain_override_set = True
+
     session = SessionState(goal, session_id=session_id)
     run_dir = _make_run_dir()
     step_num = 0
@@ -371,6 +395,7 @@ def run_agent_autonomous(
                         api_key=api_key,
                         step=step_num,
                         context=context,
+                        system_prompt_extra=system_prompt_extra,
                     )
                 else:
                     action, llm_raw, llm_prompt = planner.decide_action_retry(
@@ -379,6 +404,7 @@ def run_agent_autonomous(
                         invalid_ref=action.get("ref", ""),
                         api_key=api_key,
                         step=step_num,
+                        system_prompt_extra=system_prompt_extra,
                     )
 
                 # ask / done không cần validate ref
@@ -423,6 +449,7 @@ def run_agent_autonomous(
                                 api_key=api_key,
                                 step=step_num,
                                 annotated_b64=fresh_annotated_b64,
+                                system_prompt_extra=system_prompt_extra,
                             )
                             if action.get("action") in ("click", "type"):
                                 if not browser.ref_exists(action.get("ref", ""), fresh_snapshot):
@@ -600,5 +627,13 @@ def run_agent_autonomous(
             session.save_visual_fallback_log(vfb_log, run_dir)
     except Exception:
         pass
+    _cleanup_old_screenshots(run_dir)
+
+    # Reset allowlist về default để worker kế tiếp không bị ảnh hưởng
+    if _domain_override_set:
+        try:
+            browser.reset_allowed_domains()
+        except Exception:
+            pass
 
     return session
