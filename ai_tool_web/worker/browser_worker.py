@@ -12,8 +12,10 @@ Docker:
 
 import argparse
 import asyncio
+import json
 import logging
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -49,6 +51,77 @@ _setup_logging()
 _log = logging.getLogger(__name__)
 
 
+def _mask_redis_url(url: str) -> str:
+    """Mask password in redis URL: redis://:SECRET@host → redis://:***@host"""
+    return re.sub(r"(?<=:)[^@:]+(?=@)", "***", url) if "@" in url else url
+
+
+async def _startup_check(worker_id: str, api_key: str) -> None:
+    """Log env config + test LLM/upload connectivity khi worker start."""
+    from config import (
+        LLM_MODEL, LLM_TIMEOUT_S, BROWSER_TIMEOUT_S,
+        UPLOAD_URL, UPLOAD_ENABLED, UPLOAD_TIMEOUT_S, REDIS_URL,
+    )
+
+    _log.info(json.dumps({
+        "type": "startup",
+        "worker_id": worker_id,
+        "env": {
+            "HTTP_PROXY": os.getenv("HTTP_PROXY", ""),
+            "NO_PROXY": os.getenv("NO_PROXY", "")[:200],
+            "LLM_MODEL": LLM_MODEL,
+            "LLM_TIMEOUT": LLM_TIMEOUT_S,
+            "BROWSER_TIMEOUT": BROWSER_TIMEOUT_S,
+            "UPLOAD_URL": UPLOAD_URL,
+            "UPLOAD_ENABLED": UPLOAD_ENABLED,
+            "UPLOAD_TIMEOUT": UPLOAD_TIMEOUT_S,
+            "REDIS_URL": _mask_redis_url(REDIS_URL),
+        },
+    }, ensure_ascii=False))
+
+    # Test LLM connectivity
+    try:
+        from openai import OpenAI
+        client = OpenAI(api_key=api_key)
+        client.models.list()
+        _log.info(json.dumps({"type": "startup_check", "target": "llm", "status": "ok"}))
+    except Exception as e:
+        _log.error(json.dumps({
+            "type": "startup_check", "target": "llm",
+            "status": "fail", "error": str(e)[:200],
+        }))
+
+    # Test upload endpoint
+    if UPLOAD_URL:
+        try:
+            import requests
+            resp = requests.head(
+                UPLOAD_URL.rstrip("/") + "/api/v1/file/upload",
+                timeout=5,
+                proxies={"http": None, "https": None},
+            )
+            _log.info(json.dumps({
+                "type": "startup_check", "target": "upload",
+                "status": "ok", "http": resp.status_code,
+            }))
+        except Exception as e:
+            _log.error(json.dumps({
+                "type": "startup_check", "target": "upload",
+                "status": "fail", "error": str(e)[:200],
+            }))
+
+
+async def _log_upload_loop(log_svc) -> None:
+    """Upload system logs theo interval — chạy song song heartbeat."""
+    from config import LOG_UPLOAD_INTERVAL_S
+    while True:
+        await asyncio.sleep(LOG_UPLOAD_INTERVAL_S)
+        try:
+            log_svc.flush_upload()
+        except Exception as e:
+            _log.warning(f"Log upload failed: {e}")
+
+
 async def main(worker_id: str) -> None:
     # Isolate browser session per worker — each worker gets its own Chrome context
     os.environ["AGENT_BROWSER_SESSION"] = worker_id
@@ -62,8 +135,18 @@ async def main(worker_id: str) -> None:
         __import__("datetime").timezone.utc
     ).isoformat()
 
+    await _startup_check(worker_id, api_key)
+
+    # Initialize LogService
+    from config import ARTIFACTS_ROOT
+    from services.artifact_uploader import get_uploader
+    from services.log_service import get_log_service
+    log_svc = get_log_service(worker_id, ARTIFACTS_ROOT, get_uploader())
+    log_svc.log_system("INFO", "startup", api_key_set=bool(api_key))
+
     await worker_registry.register(async_r, worker_id, "idle", "", started_at=started_at_iso)
     hb_task = asyncio.create_task(heartbeat.run(worker_id, async_r))
+    log_upload_task = asyncio.create_task(_log_upload_loop(log_svc))
     _log.info(f"[{worker_id}] Worker started, waiting for jobs")
 
     try:
@@ -84,6 +167,7 @@ async def main(worker_id: str) -> None:
                 continue
 
             _log.info(f"[{worker_id}] Picked up session {session_id}")
+            log_svc.log_system("INFO", "job_picked", session_id=session_id)
             await worker_registry.update(async_r, worker_id, status="busy", current_session=session_id)
             await session_store.update_async(async_r, session_id,
                                              status="assigned", assigned_worker=worker_id)
@@ -99,16 +183,21 @@ async def main(worker_id: str) -> None:
                 )
             except Exception as exc:
                 _log.error(f"[{worker_id}] Unhandled error in session {session_id}: {exc}", exc_info=True)
+                log_svc.log_error("unhandled_error", str(exc), session_id=session_id)
             finally:
                 sync_r.close()
                 await async_r.delete(f"lock:session:{session_id}")
                 await worker_registry.update(async_r, worker_id, status="idle", current_session="")
+                log_svc.log_system("INFO", "job_released", session_id=session_id)
                 _log.info(f"[{worker_id}] Released session {session_id}")
 
     except asyncio.CancelledError:
         _log.info(f"[{worker_id}] Worker shutting down")
+        log_svc.log_system("INFO", "shutdown")
+        log_svc.flush_upload()
     finally:
         hb_task.cancel()
+        log_upload_task.cancel()
         await async_r.aclose()
 
 

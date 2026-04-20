@@ -1,19 +1,85 @@
-# Test Guide — Phase 2 Verification
+# Tests — Phase 1 Verification
 
-## Yêu cầu
+## Yêu cầu chung
 
 - Docker Desktop đang chạy
 - Stack đang up: `docker compose -f docker_build/docker-compose.yml up -d`
 - API healthy: `curl http://localhost:8000/v1/health`
+- Worker alive: response có `workers_alive >= 1`
 
 ---
 
-## Case 1: Cancel khi waiting_for_user
-
-**Mục tiêu:** Agent reach `ask` → gọi cancel → SSE nhận `cancelled` → status = `cancelled`
+## Chạy toàn bộ Phase 1 test suite
 
 ```bash
-cd ai_tool_web
+bash product_build/run_phase1_tests.sh
+```
+
+Tùy chọn:
+```bash
+# Bỏ qua build (image đã có)
+bash product_build/run_phase1_tests.sh --skip-build
+
+# Chỉ chạy 1 test cụ thể
+bash product_build/run_phase1_tests.sh --only T1
+bash product_build/run_phase1_tests.sh --only T3
+
+# Custom API URL
+bash product_build/run_phase1_tests.sh --base-url http://192.168.1.100:8000
+```
+
+---
+
+## T1 — Smoke Test
+
+**Mục tiêu:** Xác nhận pipeline API → Redis → Worker → SSE thông suốt.
+
+**Kiểm tra:**
+1. `GET /v1/health` → status=ok, workers_alive >= 1
+2. `POST /v1/sessions` → 201, nhận session_id hợp lệ
+3. `GET /v1/sessions/{id}` → status hợp lệ
+4. SSE stream → nhận ít nhất 1 event (không phải heartbeat)
+5. `POST /v1/sessions/{id}/cancel` → session kết thúc
+
+```bash
+cd deploy_server/ai_tool_web
+PYTHONIOENCODING=utf-8 python tests/test_smoke.py
+```
+
+**Thời gian:** ~1–3 phút (chờ worker pick up + emit event đầu tiên)
+
+---
+
+## T3 — Ask / Resume Flow
+
+**Mục tiêu:** Xác nhận luồng agent hỏi → user trả lời → worker tiếp tục.
+
+**Kịch bản:** Tạo session không có credentials → agent emit `ask` → gọi `/resume` → worker tiếp tục
+
+```bash
+cd deploy_server/ai_tool_web
+PYTHONIOENCODING=utf-8 python tests/test_ask_resume_flow.py
+
+# Resume với password thật (nếu muốn test tiếp đến done)
+PYTHONIOENCODING=utf-8 python tests/test_ask_resume_flow.py \
+  --resume-answer "actual_password_here"
+```
+
+**PASS khi thấy:**
+```
+PASS: Ask / Resume flow hoạt động đúng
+```
+
+**Thời gian:** ~3–5 phút (chờ agent navigate đến bước ask)
+
+---
+
+## T4 — Cancel during waiting_for_user
+
+**Mục tiêu:** Agent reach `ask` → cancel → SSE nhận `cancelled` → status = `cancelled`
+
+```bash
+cd deploy_server/ai_tool_web
 PYTHONIOENCODING=utf-8 python tests/test_cancel_waiting.py
 ```
 
@@ -22,30 +88,25 @@ PYTHONIOENCODING=utf-8 python tests/test_cancel_waiting.py
 PASS: Cancel during waiting_for_user hoạt động đúng!
 ```
 
-**Thời gian:** ~30–60s (chờ agent navigate đến bước ask)
+**Thời gian:** ~2–4 phút
 
 ---
 
-## Case 2: Worker crash recovery
+## T5 — Worker Crash Recovery
 
-**Mục tiêu:**
-- Sub-case A: kill worker khi `running` → session thành `failed` trong ~45s
-- Sub-case B: kill worker khi `waiting_for_user` → session thành `failed` trong ~45s
+**Mục tiêu:** Kill worker giữa session → recovery loop detect → session marked failed
 
 ```bash
-cd ai_tool_web
+cd deploy_server/ai_tool_web
 PYTHONIOENCODING=utf-8 python tests/test_worker_crash_recovery.py \
   --compose-file ../docker_build/docker-compose.yml
-```
 
-Chạy từng sub-case riêng:
-```bash
-# Chỉ case A
-PYTHONIOENCODING=utf-8 python tests/test_worker_crash_recovery.py \
+# Chỉ sub-case A (kill khi running)
+python tests/test_worker_crash_recovery.py \
   --compose-file ../docker_build/docker-compose.yml --case A
 
-# Chỉ case B
-PYTHONIOENCODING=utf-8 python tests/test_worker_crash_recovery.py \
+# Chỉ sub-case B (kill khi waiting_for_user)
+python tests/test_worker_crash_recovery.py \
   --compose-file ../docker_build/docker-compose.yml --case B
 ```
 
@@ -55,46 +116,50 @@ Sub-case A: PASS
 Sub-case B: PASS
 ```
 
-**Thời gian:** ~3–4 phút (recovery_loop chạy mỗi 30s, worker key TTL 30s)
+**Thời gian:** ~4–6 phút (recovery_loop chạy mỗi 30s, worker TTL 30s)
 
-Script tự động restart worker sau khi test xong.
+Script tự động restart worker sau test.
 
 ---
 
-## Nếu test FAIL
+## Concurrent Sessions (load test, không bắt buộc Phase 1)
 
-### Case 1 không nhận được `ask` event
-- Kiểm tra worker đang chạy: `curl http://localhost:8000/v1/health`
-- Xem log worker: `docker compose -f docker_build/docker-compose.yml logs browser-worker --tail=50`
-
-### Case 2 không chuyển sang `failed`
-- Kiểm tra API log xem recovery_loop có chạy không:
-  ```bash
-  docker compose -f docker_build/docker-compose.yml logs api --tail=100 | grep -i recovery
-  ```
-- Kiểm tra worker key trong Redis sau khi kill:
-  ```bash
-  docker exec docker_build-redis-1 redis-cli KEYS "worker:*"
-  # Nếu còn key → worker chưa bị kill hết
-  # Nếu không còn key → recovery_loop sẽ detect qua orphaned session scan
-  ```
-
-### Xem trạng thái session thủ công
 ```bash
-# Thay SESSION_ID bằng ID thật từ output test
-curl http://localhost:8000/v1/sessions/SESSION_ID
+# Scale worker trước
+docker compose -f docker_build/docker-compose.yml up -d --scale browser-worker=3
+
+cd deploy_server/ai_tool_web
+PYTHONIOENCODING=utf-8 python tests/test_concurrent_sessions.py --n 3
 ```
 
 ---
 
-## Cleanup sau test
+## Troubleshooting
 
-Worker bị kill sẽ được script tự restart. Nếu cần restart thủ công:
+### API không phản hồi
 ```bash
-docker compose -f docker_build/docker-compose.yml up -d browser-worker
+docker compose -f docker_build/docker-compose.yml ps
+docker compose -f docker_build/docker-compose.yml logs api --tail=30
 ```
 
-Xóa session cũ trong Redis (optional):
+### Worker không pick up job
+```bash
+curl http://localhost:8000/v1/health
+# workers_alive phải >= 1
+
+docker compose -f docker_build/docker-compose.yml logs browser-worker --tail=50
+```
+
+### Không nhận ask event
+```bash
+# Xem worker đang làm gì
+docker compose -f docker_build/docker-compose.yml logs browser-worker --tail=100
+
+# Xem session state trong Redis
+docker exec docker_build-redis-1 redis-cli HGETALL session:<SESSION_ID>
+```
+
+### Cleanup Redis sau test
 ```bash
 docker exec docker_build-redis-1 redis-cli FLUSHDB
 ```

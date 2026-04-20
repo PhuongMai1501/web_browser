@@ -55,6 +55,7 @@ async def create_async(
         "ask_deadline_at": "",
         "cancel_requested": "0",
         "artifact_root": "",
+        "result_path": "",
         "scenario_config": json.dumps(scenario_config, ensure_ascii=False),
         "error_msg": "",
         "client_id": client_id,
