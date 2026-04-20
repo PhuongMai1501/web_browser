@@ -1,0 +1,7 @@
+# Normalize line endings: git stores LF, checkout respects OS native
+* text=auto eol=lf
+
+# Binary files (don't touch)
+*.png binary
+*.rdb binary
+*.deb binary
