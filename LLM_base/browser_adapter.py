@@ -7,10 +7,48 @@ import base64
 import re
 import os
 import platform
+import time
+from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
 
 _BROWSER_TIMEOUT_S = int(os.getenv("BROWSER_TIMEOUT", "30"))
+
+# ── Trace buffer (bật/tắt từ runner để log agent-browser CLI theo session) ────
+_TRACE_ENABLED = False
+_TRACE_BUFFER: list[dict] = []
+_TRACE_CURRENT_STEP = 0
+_TRACE_STDOUT_MAX = 5000   # truncate stdout per-entry để file không phồng
+
+
+def start_trace() -> None:
+    """Bắt đầu ghi tất cả _run() calls vào buffer. Reset buffer."""
+    global _TRACE_ENABLED
+    _TRACE_BUFFER.clear()
+    _TRACE_ENABLED = True
+
+
+def stop_trace() -> list[dict]:
+    """Tắt trace và trả về toàn bộ buffer."""
+    global _TRACE_ENABLED
+    _TRACE_ENABLED = False
+    data = list(_TRACE_BUFFER)
+    _TRACE_BUFFER.clear()
+    return data
+
+
+def set_trace_step(step: int) -> None:
+    """Gắn step hiện tại để các _run() tiếp theo thuộc step này."""
+    global _TRACE_CURRENT_STEP
+    _TRACE_CURRENT_STEP = step
+
+
+def _truncate(s: str, limit: int = _TRACE_STDOUT_MAX) -> str:
+    if not s:
+        return ""
+    if len(s) <= limit:
+        return s
+    return s[:limit] + f"... [truncated {len(s) - limit} chars]"
 
 
 ARTIFACTS_DIR = Path(__file__).parent / "artifacts"
@@ -76,14 +114,42 @@ def _run(args: list[str], timeout: int = _BROWSER_TIMEOUT_S) -> str:
         cmd = ["cmd", "/c", "agent-browser"] + args
     else:
         cmd = ["agent-browser"] + args
-    result = subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        timeout=timeout,
-        shell=False,
-    )
+    ts = datetime.now().isoformat()
+    started = time.monotonic()
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=timeout,
+            shell=False,
+        )
+    except Exception as exc:
+        duration_ms = int((time.monotonic() - started) * 1000)
+        if _TRACE_ENABLED:
+            _TRACE_BUFFER.append({
+                "step": _TRACE_CURRENT_STEP,
+                "timestamp": ts,
+                "command": args,
+                "duration_ms": duration_ms,
+                "returncode": None,
+                "stdout": "",
+                "stderr": "",
+                "exception": f"{type(exc).__name__}: {exc}",
+            })
+        raise
+    duration_ms = int((time.monotonic() - started) * 1000)
+    if _TRACE_ENABLED:
+        _TRACE_BUFFER.append({
+            "step": _TRACE_CURRENT_STEP,
+            "timestamp": ts,
+            "command": args,
+            "duration_ms": duration_ms,
+            "returncode": result.returncode,
+            "stdout": _truncate(result.stdout or ""),
+            "stderr": _truncate(result.stderr or "", 2000),
+        })
     if result.returncode != 0:
         raise RuntimeError(
             f"agent-browser error (exit {result.returncode}):\n{result.stderr.strip()}"
@@ -332,15 +398,20 @@ def _enrich_snapshot_with_dom_hints(snapshot: str) -> str:
     return snapshot
 
 
-def take_screenshot(save_path: str | None = None) -> tuple[str, str]:
+def take_screenshot(save_path: str | None = None, full_page: bool = False) -> tuple[str, str]:
     """
     Chụp screenshot và trả về (base64_string, file_path).
     Nếu save_path không cung cấp, lưu vào artifacts/.
+    full_page=True dùng `screenshot --full` để chụp toàn trang (không chỉ viewport).
     """
     if save_path is None:
         save_path = str(ARTIFACTS_DIR / "screenshot.png")
 
-    _run(["screenshot", save_path])
+    args = ["screenshot"]
+    if full_page:
+        args.append("--full")
+    args.append(save_path)
+    _run(args)
 
     with open(save_path, "rb") as f:
         b64 = base64.b64encode(f.read()).decode("utf-8")
@@ -348,7 +419,7 @@ def take_screenshot(save_path: str | None = None) -> tuple[str, str]:
     return b64, save_path
 
 
-def take_annotated_screenshot(save_path: str | None = None) -> tuple[str, str]:
+def take_annotated_screenshot(save_path: str | None = None, full_page: bool = False) -> tuple[str, str]:
     """
     Chụp screenshot có đánh số label lên từng interactive element.
     Dùng để hiển thị cho user thấy GPT "nhìn" vào element nào.
@@ -357,16 +428,43 @@ def take_annotated_screenshot(save_path: str | None = None) -> tuple[str, str]:
     if save_path is None:
         save_path = str(ARTIFACTS_DIR / "screenshot_annotated.png")
 
+    args = ["screenshot", "--annotate"]
+    if full_page:
+        args.append("--full")
+    args.append(save_path)
     try:
-        _run(["screenshot", "--annotate", save_path])
+        _run(args)
     except Exception:
         # Fallback: chụp screenshot thường nếu --annotate không hỗ trợ
-        _run(["screenshot", save_path])
+        fb_args = ["screenshot"]
+        if full_page:
+            fb_args.append("--full")
+        fb_args.append(save_path)
+        _run(fb_args)
 
     with open(save_path, "rb") as f:
         b64 = base64.b64encode(f.read()).decode("utf-8")
 
     return b64, save_path
+
+
+def scroll_page(direction: str = "down", amount: int | None = None) -> str:
+    """Scroll trang theo direction. direction: up|down|left|right|top|bottom.
+    amount: pixels (None → default 300 của agent-browser; 'top'/'bottom' bỏ qua)."""
+    d = (direction or "down").lower()
+    if d in ("top", "bottom"):
+        # Dùng JS eval để về đúng đầu/cuối document
+        import base64 as _b64
+        if d == "top":
+            js = "window.scrollTo(0, 0); 'top'"
+        else:
+            js = "window.scrollTo(0, document.body.scrollHeight); 'bottom'"
+        b64 = _b64.b64encode(js.encode()).decode()
+        return _run(["eval", "-b", b64], timeout=10)
+    args = ["scroll", d]
+    if amount is not None:
+        args.append(str(int(amount)))
+    return _run(args, timeout=10)
 
 
 def click_element(ref: str) -> str:
@@ -401,6 +499,43 @@ def get_current_url() -> str:
 def get_page_title() -> str:
     """Lấy title trang hiện tại."""
     return _run(["get", "title"], timeout=10)
+
+
+def get_attr(ref: str, attr_name: str) -> str:
+    """Đọc attribute của element theo ref (vd 'href', 'src').
+
+    LƯU Ý: một số version agent-browser không hỗ trợ `@ref` cho command
+    `get attr` → caller nên fallback sang JS eval hoặc click + target override.
+    """
+    ref = ref.lstrip("@")
+    _validate_ref(ref)
+    return _run(["get", "attr", attr_name, f"@{ref}"], timeout=10)
+
+
+def force_same_tab_links() -> str:
+    """Override tất cả <a target='_blank'> thành target='_self' + unset onclick
+    window.open, để click link navigate same-tab (agent-browser session không
+    follow tab mới)."""
+    import base64 as _b64
+    js = (
+        "(function(){"
+        "var n=0;"
+        "document.querySelectorAll('a[target=\"_blank\"]').forEach(function(a){"
+        "  a.target='_self'; n++;"
+        "});"
+        "return 'overrode ' + n + ' links';"
+        "})()"
+    )
+    b64 = _b64.b64encode(js.encode()).decode()
+    return _run(["eval", "-b", b64], timeout=10)
+
+
+def eval_js(js_code: str, timeout: int = 10) -> str:
+    """Chạy JS tuỳ ý trên trang hiện tại, trả về stdout thô của agent-browser.
+    Caller tự parse JSON nếu cần. Dùng base64 để tránh shell escape issue."""
+    import base64 as _b64
+    b64 = _b64.b64encode(js_code.encode("utf-8")).decode()
+    return _run(["eval", "-b", b64], timeout=timeout)
 
 
 def extract_refs(snapshot: str) -> set[str]:

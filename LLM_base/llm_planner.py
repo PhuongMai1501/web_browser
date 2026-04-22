@@ -6,6 +6,7 @@ import json
 import os
 import re
 import time
+from datetime import datetime
 from openai import OpenAI, RateLimitError
 from prompts import SYSTEM_PROMPT, build_user_prompt, build_retry_prompt, build_visual_fallback_prompt, build_history_prompt
 
@@ -15,6 +16,41 @@ _LLM_MAX_RETRIES = int(os.getenv("LLM_MAX_RETRIES", "3"))
 _RETRY_DELAYS = [1, 3, 8]  # seconds, exponential backoff khi gặp 429
 
 _VALID_ACTIONS = {"click", "type", "wait", "done", "ask"}
+
+
+# ── Trace (bật từ runner để log từng LLM call cho debug) ─────────────────────
+_TRACE_ENABLED = False
+_TRACE_BUFFER: list[dict] = []
+_TRACE_CURRENT_STEP = 0
+_TRACE_PROMPT_MAX = 20000     # prompt có thể có snapshot 10-20KB
+_TRACE_RESPONSE_MAX = 8000
+
+
+def start_trace() -> None:
+    global _TRACE_ENABLED
+    _TRACE_BUFFER.clear()
+    _TRACE_ENABLED = True
+
+
+def stop_trace() -> list[dict]:
+    global _TRACE_ENABLED
+    _TRACE_ENABLED = False
+    data = list(_TRACE_BUFFER)
+    _TRACE_BUFFER.clear()
+    return data
+
+
+def set_trace_step(step: int) -> None:
+    global _TRACE_CURRENT_STEP
+    _TRACE_CURRENT_STEP = step
+
+
+def _truncate(s: str, limit: int) -> str:
+    if not s:
+        return ""
+    if len(s) <= limit:
+        return s
+    return s[:limit] + f"... [truncated {len(s) - limit} chars]"
 
 
 def _validate_action(action: dict) -> None:
@@ -108,6 +144,8 @@ def _call_llm(client: OpenAI, system: str, user_content: list) -> tuple[dict, st
     for attempt in range(len(_RETRY_DELAYS) + 1):
         if attempt > 0:
             time.sleep(_RETRY_DELAYS[attempt - 1])
+        ts = datetime.now().isoformat()
+        started = time.monotonic()
         try:
             response = client.chat.completions.create(
                 model=_LLM_MODEL,
@@ -121,10 +159,32 @@ def _call_llm(client: OpenAI, system: str, user_content: list) -> tuple[dict, st
                 timeout=_LLM_TIMEOUT_S,
             )
             raw = response.choices[0].message.content
+            duration_ms = int((time.monotonic() - started) * 1000)
+            if _TRACE_ENABLED:
+                _TRACE_BUFFER.append({
+                    "step": _TRACE_CURRENT_STEP,
+                    "timestamp": ts,
+                    "model": _LLM_MODEL,
+                    "attempt": attempt,
+                    "duration_ms": duration_ms,
+                    "system_prompt": _truncate(system, _TRACE_PROMPT_MAX),
+                    "user_prompt": _truncate(prompt_text, _TRACE_PROMPT_MAX),
+                    "raw_response": _truncate(raw or "", _TRACE_RESPONSE_MAX),
+                    "image_count": sum(1 for it in clean_content if it.get("type") == "image_url"),
+                })
             action = json.loads(raw)
             _validate_action(action)
             return action, raw, prompt_text
-        except RateLimitError:
+        except RateLimitError as exc:
+            if _TRACE_ENABLED:
+                _TRACE_BUFFER.append({
+                    "step": _TRACE_CURRENT_STEP,
+                    "timestamp": ts,
+                    "model": _LLM_MODEL,
+                    "attempt": attempt,
+                    "duration_ms": int((time.monotonic() - started) * 1000),
+                    "exception": f"RateLimitError: {exc}",
+                })
             if attempt == len(_RETRY_DELAYS):
                 raise  # hết retry → để caller xử lý
 

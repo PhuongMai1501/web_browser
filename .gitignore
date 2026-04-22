@@ -1,23 +1,63 @@
 # Environment
 .env
+.env.local
+.env.*.local
 
 # Python
 __pycache__/
 *.py[cod]
 *.pyo
+*.pyd
 venv/
+.venv/
+env/
 *.egg-info/
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+.tox/
 
-# Artifacts & logs
+# Artifacts & logs (heavy, per-run data)
 LLM_base/artifacts/
 logs/
+*.log
 
 # Large install files
 Miniconda3-latest-Linux-x86_64.sh
 google-chrome-stable_current_amd64.deb
+*.deb
+*.rpm
 
-# OS
+# Archives / deploy bundles
+*.tar.gz
+*.tgz
+*.zip
+*.bundle
+
+# Node (phòng khi web UI land vào repo)
+node_modules/
+dist/
+build/
+.next/
+.nuxt/
+
+# Editor / OS cruft
 .DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+*.bak
+*.tmp
 
-# Redis snapshot (may contain session data)
+# Jupyter
+.ipynb_checkpoints/
+
+# Redis snapshot (có thể chứa session data / credentials)
 dump.rdb
+*.rdb

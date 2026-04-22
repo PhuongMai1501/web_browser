@@ -30,6 +30,9 @@ if str(_LLM_BASE) not in sys.path:
 
 from scenarios.spec import ScenarioSpec  # noqa: E402
 from scenarios.hooks_registry import HOOK_REGISTRY  # noqa: E402
+from scenarios.action_registry import ACTION_REGISTRY  # noqa: E402
+# Trigger action registration để ACTION_REGISTRY đầy đủ trước khi validate
+import scenarios.actions  # noqa: E402,F401
 
 
 _log = logging.getLogger(__name__)
@@ -55,7 +58,8 @@ class ContextValidationError(ValueError):
 # ── Validation ─────────────────────────────────────────────────────────────────
 
 def validate_spec(spec: ScenarioSpec) -> None:
-    """Check hook names tồn tại trong HOOK_REGISTRY. Gọi trước khi save."""
+    """Check hook names, action names, step refs. Gọi trước khi save."""
+    # 1) Hooks
     for field_name in ("pre_check", "post_step", "final_capture"):
         name = getattr(spec.hooks, field_name)
         if name and name not in HOOK_REGISTRY:
@@ -64,12 +68,76 @@ def validate_spec(spec: ScenarioSpec) -> None:
                 f"Hook hợp lệ: {sorted(HOOK_REGISTRY)}"
             )
 
+    # 2) mode=flow — cần ít nhất 1 step và action names phải hợp lệ
+    if spec.mode == "flow":
+        if not spec.steps:
+            raise ScenarioValidationError(
+                "mode='flow' yêu cầu ít nhất 1 step trong 'steps'"
+            )
+        input_names = {i.name for i in (spec.inputs or [])}
+        _validate_steps(spec.steps, input_names, path="steps")
+
+    # mode=agent không ép goal/start_url ở validation — custom scenario cố ý
+    # để rỗng, nhận override từ request. Runner có fallback text mặc định.
+
+
+def _validate_steps(steps, input_names: set[str], path: str) -> None:
+    for idx, step in enumerate(steps or []):
+        here = f"{path}[{idx}]"
+        if step.action not in ACTION_REGISTRY:
+            raise ScenarioValidationError(
+                f"{here}: action '{step.action}' chưa register. "
+                f"Action hợp lệ: {sorted(ACTION_REGISTRY)}"
+            )
+        # value_from phải reference tên field trong inputs (hoặc runtime-ask)
+        if step.value_from and input_names and step.value_from not in input_names:
+            # Chỉ warning-as-error nếu inputs được khai báo; nếu inputs rỗng
+            # (back-compat) cho phép value_from tự do.
+            raise ScenarioValidationError(
+                f"{here}: value_from='{step.value_from}' không có trong inputs "
+                f"({sorted(input_names)})"
+            )
+        # ask_user cần field + prompt
+        if step.action == "ask_user":
+            if not step.field:
+                raise ScenarioValidationError(f"{here}: ask_user thiếu 'field'")
+        # goto cần url
+        if step.action == "goto" and not step.url:
+            raise ScenarioValidationError(f"{here}: goto thiếu 'url'")
+        # if_visible cần target + then
+        if step.action == "if_visible":
+            if step.target is None:
+                raise ScenarioValidationError(f"{here}: if_visible thiếu 'target'")
+            if not step.then and not step.else_:
+                raise ScenarioValidationError(
+                    f"{here}: if_visible cần 'then' hoặc 'else' không rỗng"
+                )
+            _validate_steps(step.then, input_names, f"{here}.then")
+            _validate_steps(step.else_, input_names, f"{here}.else")
+
 
 def validate_context(spec: ScenarioSpec, context: Optional[dict]) -> None:
-    """Check request context thoả context_schema.required của spec."""
+    """Check request context thoả spec.inputs (ưu tiên v2) hoặc
+    context_schema.required (back-compat v1)."""
+    ctx = context or {}
+
+    # v2: inputs với source=context + required=true
+    if spec.inputs:
+        missing = []
+        for inp in spec.inputs:
+            if inp.source != "context":
+                continue  # ask_user runtime không yêu cầu ở request
+            if inp.required and (inp.name not in ctx or ctx[inp.name] in (None, "")):
+                missing.append(inp.name)
+        if missing:
+            raise ContextValidationError(
+                f"Thiếu field context bắt buộc: {missing} (scenario={spec.id})"
+            )
+        return
+
+    # v1 fallback
     schema = spec.context_schema or {}
     required = schema.get("required") or []
-    ctx = context or {}
     missing = [k for k in required if k not in ctx or ctx[k] in (None, "")]
     if missing:
         raise ContextValidationError(

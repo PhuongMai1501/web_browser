@@ -50,9 +50,11 @@ class ScenarioSummary(BaseModel):
 
 # ── Routes ────────────────────────────────────────────────────────────────────
 
+# GET endpoints public — UI frontend cần đọc list + inputs để render form động
+# mà không lộ admin token. CRUD (POST/PUT/DELETE) vẫn yêu cầu X-Admin-Token.
+
 @router.get("", response_model=list[ScenarioSummary])
-async def list_scenarios(x_admin_token: Optional[str] = Header(default=None)):
-    _require_admin(x_admin_token)
+async def list_scenarios():
     redis = get_async_redis()
     specs = await scenario_service.list_async(redis)
     return [
@@ -61,12 +63,12 @@ async def list_scenarios(x_admin_token: Optional[str] = Header(default=None)):
             enabled=s.enabled, builtin=s.builtin, version=s.version,
         )
         for s in specs
+        if s.enabled   # không expose scenario đang disable cho UI
     ]
 
 
 @router.get("/{scenario_id}", response_model=ScenarioSpec)
-async def get_scenario(scenario_id: str, x_admin_token: Optional[str] = Header(default=None)):
-    _require_admin(x_admin_token)
+async def get_scenario(scenario_id: str):
     redis = get_async_redis()
     spec = await scenario_service.get_async(redis, scenario_id)
     if spec is None:

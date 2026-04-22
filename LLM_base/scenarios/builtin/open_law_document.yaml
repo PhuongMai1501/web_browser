@@ -1,0 +1,108 @@
+id: open_law_document
+display_name: Tìm & mở văn bản trên Thư Viện Pháp Luật
+description: |
+  Search trên thuvienphapluat.vn bằng `keyword`, rồi click vào văn bản có
+  tiêu đề chứa `title_hint` trong danh sách kết quả. Ví dụ:
+  keyword="QCVN 10:2025/BCA" (số hiệu — điền vào ô search để narrow kết quả),
+  title_hint="khí thải công nghiệp" (đoạn unique trong title — để click đúng
+  mục cần).
+  Lưu ý: chọn title_hint đặc trưng để tránh match nhầm (nhiều kết quả cùng
+  chứa title_hint → chỉ pick kết quả đầu).
+enabled: true
+mode: flow
+
+start_url: https://thuvienphapluat.vn
+max_steps_default: 12
+allowed_domains:
+  - thuvienphapluat.vn
+
+inputs:
+  - name: keyword
+    type: string
+    required: true
+    source: context
+    description: "Số hiệu / từ khoá chính — để điền vào ô search"
+  - name: title_hint
+    type: string
+    required: true
+    source: context
+    description: "Text đặc trưng trong tiêu đề văn bản cần mở (AND với keyword)"
+
+steps:
+  # 1) Chờ ô search trên header
+  - action: wait_for
+    target:
+      role: textbox
+      text_any: ["Tìm Văn bản", "Tìm Văn Bản", "Tìm kiếm"]
+    timeout_ms: 30000
+    note: "Chờ ô tìm kiếm"
+
+  # 2) Điền keyword
+  - action: fill
+    target:
+      role: textbox
+      text_any: ["Tìm Văn bản", "Tìm Văn Bản", "Tìm kiếm"]
+    value_from: keyword
+    note: "Điền keyword vào ô search"
+
+  # 3) Click Tìm kiếm
+  - action: click
+    target:
+      role: button
+      text_any: ["Tìm kiếm"]
+    note: "Bấm Tìm kiếm"
+
+  # 4) Chờ trang kết quả render.
+  # Dùng `link "Văn bản gốc"` làm marker — link này xuất hiện dưới mỗi mục
+  # trong row "Tiếng Anh | Văn bản gốc | Lược đồ | Liên quan hiệu lực | Tải về",
+  # CHỈ có trên trang kết quả và trang chi tiết (không có trên homepage).
+  # "LỌC KẾT QUẢ" / "Bạn đang tìm kiếm" là div text thuần, KHÔNG có trong
+  # accessibility snapshot → không dùng được với matcher flow mode.
+  - action: wait_for
+    target:
+      role: link
+      text_any: ["Văn bản gốc", "Liên quan hiệu lực"]
+    timeout_ms: 30000
+    note: "Chờ trang kết quả load (có link 'Văn bản gốc')"
+
+  # 5) Mở link văn bản. Dùng open_link thay click vì title link có
+  # target="_blank" (mở tab mới) — agent-browser session không follow
+  # sang tab mới. open_link extract href rồi open_url same-tab.
+  - action: open_link
+    target:
+      role: link
+      text_any:
+        - "{title_hint}"
+      nth: 0
+    note: "Mở văn bản có tiêu đề chứa title_hint (same-tab)"
+
+  # 6) Chờ trang chi tiết văn bản render.
+  # Tương tự bài học step 4: dùng marker là link/heading CÓ trong a11y
+  # thay vì text thuần. Trang chi tiết có các link "In trang", "Tải về",
+  # "Lưu" hoặc heading "Điều".
+  - action: wait_for
+    target:
+      role: link
+      text_any: ["In trang", "Lưu văn bản", "Tải về"]
+    timeout_ms: 20000
+    note: "Chờ trang chi tiết văn bản"
+
+success:
+  any_of:
+    # URL trang chi tiết văn bản có pattern /van-ban/<Linh-vuc>/<slug>.aspx
+    # KHÔNG match homepage và KHÔNG match /page/tim-van-ban.aspx.
+    # url_contains check URL hiện tại, không đi qua accessibility snapshot
+    # → đáng tin cậy nhất.
+    - url_contains: ".vn/van-ban/"
+    # text_any ở success rule dùng browser.page_contains_any() (JS eval
+    # toàn document.body.innerText) — thấy cả div thuần, không giới hạn
+    # a11y như wait_for target.
+    - text_any:
+        - "Mục lục văn bản"
+        - "Lược đồ văn bản"
+        - "Nội dung toàn văn"
+
+# KHÔNG có failure rule: "Không tìm thấy văn bản" xuất hiện cả trong
+# section CTA "Yêu cầu bổ sung..." trên homepage → dễ trigger sai. Nếu
+# search không ra kết quả, step 5 (click) sẽ timeout và flow trả error
+# có thông tin rõ ràng hơn.

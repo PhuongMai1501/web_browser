@@ -2,6 +2,7 @@
 runner.py - Orchestrator: vòng lặp agent điều khiển browser bằng LLM.
 """
 
+import json
 import logging
 import os
 from datetime import datetime
@@ -350,8 +351,42 @@ def run_agent_autonomous(
     history: list[dict] = []
     vfb_log: list[dict] = []
 
+    # Bật trace cho agent mode — flush vào run_dir khi kết thúc.
+    # try/finally đảm bảo trace flush kể cả khi generator close giữa chừng.
+    browser.start_trace()
+    planner.start_trace()
+    browser.set_trace_step(0)
+    planner.set_trace_step(0)
+
+    def _flush_traces_and_reset():
+        """Flush LLM + browser trace ra run_dir, reset allowlist. Idempotent."""
+        try:
+            llm_trace = planner.stop_trace()
+            (run_dir / "llm_trace.json").write_text(
+                json.dumps(llm_trace, ensure_ascii=False, indent=2, default=str),
+                encoding="utf-8",
+            )
+        except Exception as e:
+            _log.warning("flush llm_trace fail: %s", e)
+        try:
+            b_trace = browser.stop_trace()
+            (run_dir / "browser_trace.json").write_text(
+                json.dumps(b_trace, ensure_ascii=False, indent=2, default=str),
+                encoding="utf-8",
+            )
+        except Exception as e:
+            _log.warning("flush browser_trace fail: %s", e)
+        if _domain_override_set:
+            try:
+                browser.reset_allowed_domains()
+            except Exception:
+                pass
+
     while step_num < max_steps:
         step_num += 1
+        # Gắn step cho trace
+        browser.set_trace_step(step_num)
+        planner.set_trace_step(step_num)
 
         try:
             url_before = browser.get_current_url()
@@ -629,11 +664,6 @@ def run_agent_autonomous(
         pass
     _cleanup_old_screenshots(run_dir)
 
-    # Reset allowlist về default để worker kế tiếp không bị ảnh hưởng
-    if _domain_override_set:
-        try:
-            browser.reset_allowed_domains()
-        except Exception:
-            pass
+    _flush_traces_and_reset()
 
     return session

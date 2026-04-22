@@ -1,0 +1,85 @@
+id: login_basic
+display_name: "Login cơ bản (mode=flow)"
+description: |
+  Flow mẫu: mở trang login, điền email, điền password, click submit, check URL
+  success. Không dùng LLM, chạy cứng theo spec. Thay `start_url` + domain để
+  dùng cho site thực.
+enabled: true
+
+mode: flow
+
+start_url: https://fpt.net/login
+allowed_domains:
+  - fpt.net
+
+inputs:
+  - name: email
+    type: string
+    required: true
+    source: context
+  - name: password
+    type: secret
+    required: true
+    source: context
+  - name: otp
+    type: string
+    required: false
+    source: ask_user
+    description: "Chỉ hỏi khi trang yêu cầu OTP"
+
+steps:
+  - action: wait_for
+    target:
+      role: textbox
+      label_any: ["Email", "Tên đăng nhập", "Username"]
+    timeout_ms: 8000
+    note: "Chờ form login render"
+
+  - action: fill
+    target:
+      role: textbox
+      label_any: ["Email", "Tên đăng nhập", "Username"]
+    value_from: email
+    note: "Điền email"
+
+  - action: fill
+    target:
+      role: textbox
+      label_any: ["Password", "Mật khẩu"]
+    value_from: password
+    note: "Điền mật khẩu"
+
+  - action: click
+    target:
+      role: button
+      text_any: ["Login", "Đăng nhập", "Sign in"]
+    note: "Nhấn login"
+
+  - action: if_visible
+    target:
+      text_any: ["OTP", "Verification code", "Mã xác thực"]
+    note: "Check OTP"
+    then:
+      - action: ask_user
+        field: otp
+        prompt: "Vui lòng nhập mã OTP"
+      - action: fill
+        target:
+          role: textbox
+          label_any: ["OTP", "Verification code", "Mã xác thực"]
+        value_from: otp
+      - action: click
+        target:
+          role: button
+          text_any: ["Verify", "Xác nhận", "Continue"]
+
+success:
+  any_of:
+    - url_contains: /dashboard
+    - text_any: ["Welcome", "Xin chào", "Hi!", "Đăng xuất"]
+
+failure:
+  any_of:
+    - text_any: ["Sai mật khẩu", "Invalid password", "incorrect password"]
+  code: AUTH_FAILED
+  message: "Đăng nhập thất bại — sai mật khẩu."

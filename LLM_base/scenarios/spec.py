@@ -8,9 +8,11 @@ Serialize được thành JSON để lưu Redis hoặc YAML để seed.
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
+
+from .flow_models import FailureRule, FlowStep, InputField, SuccessRule
 
 
 class ScenarioHooks(BaseModel):
@@ -33,16 +35,31 @@ class ScenarioSpec(BaseModel):
     builtin: bool = False                 # True nếu seed từ YAML (chặn delete cứng)
     version: int = 1                      # bump khi update qua API
 
+    # v2: chế độ chạy. Default 'agent' để spec v1 không đổi hành vi.
+    #   - flow:   chạy `steps` tuần tự qua flow_runner (không cần LLM quyết).
+    #   - agent:  chạy LLM autonomous với `goal` (v1 behavior).
+    #   - hybrid: Sprint 3 — flow trước, agent fallback sau.
+    mode: Literal["flow", "agent", "hybrid"] = "agent"
+
     # Run config
     start_url: Optional[str] = None
     goal: str = ""                        # có thể chứa {placeholder} từ context
     max_steps_default: int = 20
     allowed_domains: list[str] = Field(default_factory=list)
 
-    # Input schema — JSON Schema-lite: {"required": ["email"], "optional": [...]}
+    # v2 input declaration (ưu tiên). context_schema giữ cho back-compat;
+    # validator ưu tiên `inputs` nếu có, fallback về context_schema.
+    inputs: list[InputField] = Field(default_factory=list)
+
+    # v2 flow fields — chỉ cần set khi mode='flow' hoặc 'hybrid'.
+    steps: list[FlowStep] = Field(default_factory=list)
+    success: Optional[SuccessRule] = None
+    failure: Optional[FailureRule] = None
+
+    # Legacy — giữ để các spec cũ không vỡ.
     context_schema: dict = Field(default_factory=dict)
 
-    # Prompt tuning
+    # Prompt tuning (dùng ở mode=agent / hybrid)
     system_prompt_extra: str = ""
 
     hooks: ScenarioHooks = Field(default_factory=ScenarioHooks)

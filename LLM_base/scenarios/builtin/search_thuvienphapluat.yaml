@@ -1,0 +1,78 @@
+id: search_thuvienphapluat
+display_name: Tìm kiếm Thư Viện Pháp Luật
+description: Mở thuvienphapluat.vn, điền từ khóa, bấm tìm kiếm
+enabled: true
+
+# Flow declarative — target chính xác theo snapshot thật của agent-browser
+# (xem artifacts/.../session.json của session trước để hiểu format).
+mode: flow
+
+start_url: https://thuvienphapluat.vn
+max_steps_default: 10
+allowed_domains:
+  - thuvienphapluat.vn
+
+inputs:
+  - name: keyword
+    type: string
+    required: true
+    source: context
+
+steps:
+  # 1) Chờ ô search trên header render
+  # Snapshot thật: `- textbox [ref=e70]: < Tìm Văn bản Pháp luật >`
+  # Parser mới chuyển placeholder trong <> thành label → match qua text_any.
+  - action: wait_for
+    target:
+      role: textbox
+      text_any:
+        - "Tìm Văn bản"
+        - "Tìm Văn Bản"
+        - "Tìm kiếm"
+    timeout_ms: 30000
+    note: "Chờ ô tìm kiếm trên header"
+
+  # 2) Điền keyword
+  - action: fill
+    target:
+      role: textbox
+      text_any:
+        - "Tìm Văn bản"
+        - "Tìm Văn Bản"
+        - "Tìm kiếm"
+    value_from: keyword
+    note: "Điền từ khoá"
+
+  # 3) Click nút "Tìm kiếm" (button đứng sát ô input)
+  # Snapshot thật: `- button "Tìm kiếm" [ref=e71]`
+  - action: click
+    target:
+      role: button
+      text_any: ["Tìm kiếm"]
+    note: "Bấm Tìm kiếm"
+
+  # 4) Chờ trang kết quả. URL đổi sang /page/tim-van-ban.aspx?keyword=...
+  # Dùng wait_for text xuất hiện trên trang kết quả.
+  - action: wait_for
+    target:
+      text_any:
+        - "LỌC KẾT QUẢ"
+        - "Bạn đang tìm kiếm"
+        - "Lưu ý khi tìm kiếm"    # link này chỉ có trên trang kết quả
+    timeout_ms: 30000
+    note: "Chờ trang kết quả"
+
+success:
+  any_of:
+    - url_contains: tim-van-ban
+    - text_any:
+        - "LỌC KẾT QUẢ"
+        - "Bạn đang tìm kiếm"
+
+failure:
+  any_of:
+    - text_any:
+        - "Không tìm thấy"
+        - "Có lỗi xảy ra"
+  code: SEARCH_FAILED
+  message: "Tìm kiếm không trả về kết quả"
