@@ -8,3 +8,4 @@ Pillow>=10.0.0
 redis[asyncio]>=5.0
 requests>=2.31.0
 PyYAML>=6.0
+aiosqlite>=0.22
