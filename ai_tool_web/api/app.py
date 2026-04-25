@@ -13,6 +13,16 @@ import logging.handlers
 import os
 from pathlib import Path
 
+# Auto-load .env từ dev/deploy_server/.env (parent của ai_tool_web).
+# Không-op nếu đã được PowerShell start_api_local.ps1 load sẵn.
+try:
+    from dotenv import load_dotenv
+    _env_file = Path(__file__).resolve().parents[2] / ".env"
+    if _env_file.exists():
+        load_dotenv(_env_file, override=False)
+except ImportError:
+    pass
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -27,7 +37,9 @@ from config import LOG_DIR
 from services import scenario_service
 from services.builtin_seeder import seed_builtin_from_yaml
 from store.redis_client import get_async_redis
-from store.sqlite_scenario_repo import SqliteScenarioRepo
+from store.scenario_repo import ScenarioRepository
+# SqliteScenarioRepo / MysqlScenarioRepo lazy-import trong startup theo STORAGE_BACKEND
+# để không buộc cài aiosqlite hoặc aiomysql khi chỉ dùng 1 backend.
 
 _LOG_FORMAT = '{"time":"%(asctime)s","level":"%(levelname)s","logger":"%(name)s","msg":"%(message)s"}'
 
@@ -129,12 +141,39 @@ async def _startup():
     app.state.auth_provider = auth_provider
     _log.info("Auth provider: %s (ENV=%s)", auth_provider.name, env)
 
-    # ── Phase 1: Scenario repository (SQLite) + auto-seed builtin (G2) ───────
-    db_path = os.getenv("SCENARIO_DB_PATH", "./scenarios.db")
-    repo = SqliteScenarioRepo(db_path)
-    await repo.init()
-    app.state.scenario_repo = repo
-    _log.info("Scenario repo initialized: %s", db_path)
+    # ── Phase 1: Scenario repository + auto-seed builtin (G2) ────────────────
+    # Backend chọn qua STORAGE_BACKEND: 'sqlite' (default, dev) | 'mysql' (prod)
+    backend = os.getenv("STORAGE_BACKEND", "sqlite").lower()
+    repo: ScenarioRepository
+    if backend == "mysql":
+        from store.mysql_scenario_repo import MysqlScenarioRepo
+        repo = MysqlScenarioRepo(
+            host=os.environ["MYSQL_HOST"],
+            port=int(os.getenv("MYSQL_PORT", "3306")),
+            user=os.environ["MYSQL_USER"],
+            password=os.environ["MYSQL_PASSWORD"],
+            db=os.environ["MYSQL_DB"],
+            pool_size=int(os.getenv("MYSQL_POOL_SIZE", "5")),
+        )
+        await repo.init()
+        app.state.scenario_repo = repo
+        _log.info(
+            "Scenario repo initialized (mysql): %s:%s/%s",
+            os.environ["MYSQL_HOST"],
+            os.getenv("MYSQL_PORT", "3306"),
+            os.environ["MYSQL_DB"],
+        )
+    elif backend == "sqlite":
+        from store.sqlite_scenario_repo import SqliteScenarioRepo
+        db_path = os.getenv("SCENARIO_DB_PATH", "./scenarios.db")
+        repo = SqliteScenarioRepo(db_path)
+        await repo.init()
+        app.state.scenario_repo = repo
+        _log.info("Scenario repo initialized (sqlite): %s", db_path)
+    else:
+        raise ValueError(
+            f"Unsupported STORAGE_BACKEND='{backend}'. Use 'sqlite' or 'mysql'."
+        )
 
     if await repo.count_builtin() == 0:
         try:
