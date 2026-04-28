@@ -26,12 +26,14 @@ _log = logging.getLogger(__name__)
 
 
 def _default_builtin_dir() -> Path:
-    # dev/deploy_server/ai_tool_web/services/builtin_seeder.py
-    # → parent.parent.parent = dev/deploy_server
-    return (
-        Path(__file__).resolve().parent.parent.parent
-        / "LLM_base" / "scenarios" / "builtin"
-    )
+    # Tìm builtin YAML ở 2 chỗ — bundled scenarios/builtin (production:
+    # agent_browser/scenarios/builtin, sys.path[0] khi WORKDIR /app/agent_browser)
+    # trước, fallback LLM_base/scenarios/builtin (dev legacy).
+    here = Path(__file__).resolve()
+    bundled = here.parent.parent / "scenarios" / "builtin"
+    if bundled.exists():
+        return bundled
+    return here.parent.parent.parent / "LLM_base" / "scenarios" / "builtin"
 
 
 def _now() -> datetime:

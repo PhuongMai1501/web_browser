@@ -200,8 +200,13 @@ def get_sync(sync_r: _sync_redis.Redis, scenario_id: str) -> Optional[ScenarioSp
 # ── Seed from YAML ─────────────────────────────────────────────────────────────
 
 def _builtin_dir() -> Path:
-    # LLM_base/scenarios/builtin/
-    return Path(__file__).resolve().parent.parent.parent / "LLM_base" / "scenarios" / "builtin"
+    # bundled scenarios/builtin (production: agent_browser/scenarios/builtin)
+    # → fallback LLM_base/scenarios/builtin (dev legacy)
+    here = Path(__file__).resolve()
+    bundled = here.parent.parent / "scenarios" / "builtin"
+    if bundled.exists():
+        return bundled
+    return here.parent.parent.parent / "LLM_base" / "scenarios" / "builtin"
 
 
 def load_builtin_specs(directory: Optional[Path] = None) -> list[ScenarioSpec]:
