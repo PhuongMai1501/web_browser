@@ -58,6 +58,85 @@ def friendly_error(e: Exception) -> tuple[str, str]:
     return "INTERNAL_ERROR", f"Lỗi: {e}"
 
 
+def _copy_runner_session_json(
+    session_id: str,
+    session_dir: Path,
+    uploader,
+    session_start: float,
+) -> None:
+    """Tìm session.json mới nhất trong LLM_base/artifacts/* khớp session_id,
+    copy sang session_dir và upload lên CDN.
+
+    Runner ghi session.json vào run_dir keyed theo timestamp (HH_MM_SS),
+    không theo session_id. Cần scan + match qua field session_id trong file.
+
+    Verbose log để debug — log_svc + Redis status key cho phép check qua API.
+    """
+    log_svc = get_log_service()
+    status: dict = {"step": "start"}
+    try:
+        # /app/agent_browser/worker/job_handler.py → /app/LLM_base/artifacts
+        # dev/deploy_server/ai_tool_web/worker/job_handler.py → dev/deploy_server/LLM_base/artifacts
+        llm_artifacts = Path(__file__).resolve().parent.parent.parent / "LLM_base" / "artifacts"
+        status["scan_path"] = str(llm_artifacts)
+        status["exists"] = llm_artifacts.exists()
+        if not llm_artifacts.exists():
+            log_svc.log_session(session_id, "session_json_copy_skip",
+                                reason="LLM_base/artifacts not found",
+                                **status)
+            return
+
+        # KHÔNG filter mtime — scan all session.json files để tránh miss
+        # (clock skew giữa container và FS có thể khiến mtime threshold sai)
+        candidates = sorted(
+            llm_artifacts.rglob("session.json"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )[:50]
+        status["candidates_count"] = len(candidates)
+
+        matched_path = None
+        for sj in candidates:
+            try:
+                data = json.loads(sj.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if data.get("session_id") == session_id:
+                matched_path = sj
+                break
+
+        status["matched"] = str(matched_path) if matched_path else None
+        if not matched_path:
+            log_svc.log_session(session_id, "session_json_copy_skip",
+                                reason="No matching session_id",
+                                **status)
+            return
+
+        dst = session_dir / "session.json"
+        session_dir.mkdir(parents=True, exist_ok=True)
+        dst.write_bytes(matched_path.read_bytes())
+        status["copied_to"] = str(dst)
+
+        if uploader:
+            from services.artifact_uploader import build_artifact_remote_path
+            remote = build_artifact_remote_path(session_id, "session.json")
+            cdn_url = uploader.upload_artifact(str(dst), remote)
+            status["upload_remote"] = remote
+            status["cdn_url"] = cdn_url or "(returned None)"
+        else:
+            status["upload_remote"] = None
+            status["cdn_url"] = "(uploader=None)"
+
+        log_svc.log_session(session_id, "session_json_copy_ok", **status)
+    except Exception as e:
+        status["error"] = f"{type(e).__name__}: {e}"
+        try:
+            log_svc.log_session(session_id, "session_json_copy_error", **status)
+        except Exception:
+            pass
+        _log.warning(f"[{session_id}] _copy_runner_session_json error: {e}")
+
+
 def _is_cancelled(sync_r: _sync_redis.Redis, session_id: str) -> bool:
     return sync_r.hget(f"session:{session_id}", "cancel_requested") == "1"
 
@@ -114,12 +193,36 @@ def run_job_sync(
         if callback_svc:
             callback_svc.send(session_id, event_type, payload)
 
+    # Holder để inner function _persist_artifacts đóng generator trước khi
+    # scan session.json. Worker break for loop khi terminal record → flow_runner
+    # finally chưa fire → session.json chưa exist khi scan upload.
+    _gen_holder: dict = {"gen": None}
+
+    def _close_gen() -> None:
+        g = _gen_holder.get("gen")
+        if g is None:
+            return
+        try:
+            g.close()
+        except Exception as e:
+            _log.warning(f"[{session_id}] gen.close failed: {e}")
+        finally:
+            _gen_holder["gen"] = None
+
     def _persist_artifacts(status: str, summary: str, url_after: str,
                            total_steps: int, error_msg: str = "") -> None:
-        """Ghi result.json + session.jsonl vào artifact dir, rồi upload lên CDN."""
+        """Ghi result.json + session.jsonl vào artifact dir, rồi upload lên CDN.
+
+        Cũng copy session.json (rich diagnostic của runner — llm_prompt,
+        llm_raw_response, action chosen) từ run_dir của runner sang session_dir
+        và upload, để UI fetch debug được nguyên nhân step fail.
+        """
+        # Force flush session.json từ flow_runner trước khi scan upload
+        _close_gen()
         try:
             artifact_dir = get_session_artifact_dir(session_id)
             write_session_jsonl(session_id, _collected_events, artifact_dir)
+            _copy_runner_session_json(session_id, artifact_dir, uploader, session_start)
             result_path = write_result_json(
                 session_id=session_id,
                 status=status,
@@ -169,6 +272,7 @@ def run_job_sync(
             goal_override=scenario_config.get("goal") or None,
             url_override=scenario_config.get("url") or None,
         )
+        _gen_holder["gen"] = gen
 
         answer = None
 

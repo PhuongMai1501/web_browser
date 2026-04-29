@@ -247,6 +247,56 @@ async def debug_test_upload():
             "hint": "Kiểm tra UPLOAD_URL / KEY / SECRET và log worker"}
 
 
+@app.get("/v1/debug/runner-logs")
+async def debug_runner_logs(session_id: str = "", limit: int = 20):
+    """List session.json files trong LLM_base/artifacts.
+    Optional ?session_id=X để filter theo session_id field trong file content.
+    """
+    import json as _json
+    from pathlib import Path as _Path
+
+    here = _Path(__file__).resolve()
+    llm_artifacts = here.parent.parent.parent / "LLM_base" / "artifacts"
+    info: dict = {
+        "scan_path": str(llm_artifacts),
+        "exists": llm_artifacts.exists(),
+    }
+    if not llm_artifacts.exists():
+        return info
+
+    candidates = sorted(
+        llm_artifacts.rglob("session.json"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )[:limit]
+
+    items = []
+    matched = None
+    for p in candidates:
+        try:
+            data = _json.loads(p.read_text(encoding="utf-8"))
+            sid = data.get("session_id", "")
+            entry = {
+                "path": str(p),
+                "mtime": p.stat().st_mtime,
+                "session_id": sid,
+                "scenario_id": data.get("scenario_id", ""),
+                "total_steps": data.get("total_steps", 0),
+                "size_bytes": p.stat().st_size,
+            }
+            items.append(entry)
+            if session_id and sid == session_id:
+                matched = entry
+        except Exception as e:
+            items.append({"path": str(p), "error": str(e)})
+
+    info["count"] = len(items)
+    info["items"] = items
+    if session_id:
+        info["match"] = matched
+    return info
+
+
 @app.get("/v1/debug/scenarios")
 async def debug_scenarios(reseed: bool = False):
     """Diagnostic: list scenario:* keys trong Redis + HOOK_REGISTRY + import status.
