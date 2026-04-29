@@ -295,6 +295,41 @@ class UserScenarioService:
 
         return defn
 
+    # ── Publish revision (admin) ─────────────────────────────────────────────
+
+    async def publish_revision(
+        self,
+        scenario_id: str,
+        revision_id: int,
+        user: AuthenticatedUser,
+    ) -> ScenarioDefinition:
+        """Set published_revision_id trên scenario_definitions.
+
+        Admin-only. Caller responsibility: sync Redis cache với spec mới
+        (route handler làm sau khi service trả OK).
+
+        Raises:
+            ScenarioForbidden: non-admin
+            ScenarioNotFound: scenario hoặc revision không tồn tại
+            ScenarioBadRequest: revision không thuộc scenario này
+        """
+        if not user.is_admin:
+            raise ScenarioForbidden("Chỉ admin được activate revision")
+
+        defn = await self._require_definition(scenario_id)
+        rev = await self._repo.get_revision(revision_id)
+        if rev is None:
+            raise ScenarioNotFound(f"Revision {revision_id} không tồn tại")
+        if rev.scenario_id != scenario_id:
+            raise ScenarioBadRequest(
+                [{"field": "revision_id",
+                  "message": f"Revision {revision_id} không thuộc scenario {scenario_id}"}]
+            )
+
+        await self._repo.set_published_revision(scenario_id, revision_id)
+        defn.published_revision_id = revision_id
+        return defn
+
     # ── Archive ──────────────────────────────────────────────────────────────
 
     async def archive(self, scenario_id: str, user: AuthenticatedUser) -> None:

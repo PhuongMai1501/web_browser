@@ -18,9 +18,20 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-import browser_adapter as browser
 from scenarios.hooks_registry import HookContext, HookResult, hook
-from state import StepRecord
+
+# Worker-only deps. API container chỉ import module này để register hook
+# vào HOOK_REGISTRY (validate spec ở save time) — không bao giờ CALL function.
+# Worker container có đủ browser_adapter + state ở /app/LLM_base/.
+try:
+    import browser_adapter as browser  # type: ignore[import-not-found]
+except ImportError:
+    browser = None  # type: ignore[assignment]
+
+try:
+    from state import StepRecord  # type: ignore[import-not-found]
+except ImportError:
+    StepRecord = None  # type: ignore[assignment,misc]
 
 
 # Các chuỗi CHỈ xuất hiện sau khi đăng nhập thành công

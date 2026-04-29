@@ -29,7 +29,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from api.exception_handlers import register_scenario_exception_handlers
 from api.recovery import recovery_loop
 from api.routes import (
-    browser, cancel, health, result, resume, scenarios, screenshots, sessions, stream,
+    auth, browser, cancel, health, result, resume, scenarios, screenshots, sessions, stream,
     user_hooks, user_scenarios,
 )
 from auth.mock_provider import MockAuthProvider
@@ -72,6 +72,7 @@ register_scenario_exception_handlers(app)
 # Register route modules.
 for _router_module in (
     health, sessions, stream, resume, cancel, browser, screenshots, result,
+    auth,                               # /v1/auth/me — admin status check
     user_scenarios, user_hooks,         # Phase 1 user CRUD (X-User-Id + SQLite)
 ):
     app.include_router(_router_module.router)
@@ -244,3 +245,78 @@ async def debug_test_upload():
         return {"status": "ok", "cdn_url": cdn_url}
     return {"status": "failed", "cdn_url": None,
             "hint": "Kiểm tra UPLOAD_URL / KEY / SECRET và log worker"}
+
+
+@app.get("/v1/debug/scenarios")
+async def debug_scenarios(reseed: bool = False):
+    """Diagnostic: list scenario:* keys trong Redis + HOOK_REGISTRY + import status.
+
+    Query param `?reseed=true` để force re-seed builtin từ YAML vào Redis.
+    """
+    import importlib
+    import sys
+    import traceback
+
+    redis = get_async_redis()
+
+    scenario_keys = await redis.keys("scenario:*")
+    scenario_keys = sorted([k.decode() if isinstance(k, bytes) else k for k in scenario_keys])
+
+    # Hook registry diagnostics
+    hooks_info: dict = {}
+    try:
+        from scenarios.hooks_registry import HOOK_REGISTRY
+        hooks_info["registry_keys"] = sorted(HOOK_REGISTRY.keys())
+        hooks_info["registry_count"] = len(HOOK_REGISTRY)
+    except Exception as e:
+        hooks_info["registry_error"] = f"{type(e).__name__}: {e}"
+
+    # Re-import scenarios.hooks fresh, capture traceback
+    try:
+        if "scenarios.hooks" in sys.modules:
+            importlib.reload(sys.modules["scenarios.hooks"])
+        else:
+            importlib.import_module("scenarios.hooks")
+        hooks_info["scenarios_hooks_import"] = "ok"
+    except Exception as e:
+        hooks_info["scenarios_hooks_import"] = (
+            f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
+        )
+
+    # MySQL repo
+    repo = getattr(app.state, "scenario_repo", None)
+    repo_info: dict = {}
+    if repo is not None:
+        try:
+            repo_info = {
+                "type": type(repo).__name__,
+                "builtin_count": await repo.count_builtin(),
+            }
+        except Exception as e:
+            repo_info = {"error": str(e)}
+
+    # Force reseed
+    reseeded = None
+    if reseed:
+        try:
+            reseeded = await scenario_service.seed_async(redis)
+        except Exception as e:
+            reseeded = f"error: {type(e).__name__}: {e}\n{traceback.format_exc()}"
+
+    # sys.path snapshot (top 10 entries)
+    syspath = sys.path[:10]
+
+    return {
+        "redis_url_set": bool(os.getenv("REDIS_URL")),
+        "redis_scenario_keys": scenario_keys,
+        "redis_scenario_count": len(scenario_keys),
+        "hooks": hooks_info,
+        "scenario_repo": repo_info,
+        "reseeded_count": reseeded,
+        "syspath": syspath,
+        "hint": (
+            "Nếu hooks.registry_count=0 → import scenarios.hooks failed → "
+            "validate_spec fail cho scenarios có hooks → seed skip silently. "
+            "Check hooks.scenarios_hooks_import error cụ thể."
+        ),
+    }

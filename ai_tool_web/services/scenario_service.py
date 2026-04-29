@@ -77,8 +77,15 @@ def validate_spec(spec: ScenarioSpec) -> None:
         input_names = {i.name for i in (spec.inputs or [])}
         _validate_steps(spec.steps, input_names, path="steps")
 
-    # mode=agent không ép goal/start_url ở validation — custom scenario cố ý
-    # để rỗng, nhận override từ request. Runner có fallback text mặc định.
+    # 3) mode=agent — cần goal (LLM cần instruction để biết phải làm gì).
+    # Exempt: scenario id='custom' chủ đích để rỗng, nhận override từ request.
+    if spec.mode == "agent" and spec.id != "custom":
+        if not spec.goal or not str(spec.goal).strip():
+            raise ScenarioValidationError(
+                "mode='agent' yêu cầu trường 'goal' không rỗng — LLM cần "
+                "instruction cụ thể. Thêm 'goal: |\\n  Mô tả task...' vào YAML, "
+                "hoặc đổi sang mode='flow' và define 'steps'."
+            )
 
 
 def _validate_steps(steps, input_names: set[str], path: str) -> None:

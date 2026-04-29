@@ -26,7 +26,9 @@ from pydantic import BaseModel, Field
 
 from api.dependencies import get_current_user, get_scenario_service
 from auth.providers import AuthenticatedUser
+from services import scenario_service as legacy_scenario_service
 from services.user_scenario_service import UserScenarioService
+from store.redis_client import get_async_redis
 
 
 router = APIRouter(prefix="/v1/scenarios", tags=["scenarios-v2"])
@@ -231,6 +233,46 @@ async def archive_scenario(
 ):
     """Soft delete. Builtin không archive được qua API."""
     await service.archive(scenario_id, user)
+
+
+# ── Publish revision ─────────────────────────────────────────────────────────
+
+class PublishRevisionRequest(BaseModel):
+    revision_id: int = Field(..., description="ID revision muốn activate")
+
+
+@router.post("/{scenario_id}/publish", response_model=ScenarioDetailResponse)
+async def publish_revision(
+    scenario_id: str,
+    req: PublishRevisionRequest,
+    user: AuthenticatedUser = Depends(get_current_user),
+    service: UserScenarioService = Depends(get_scenario_service),
+):
+    """Activate 1 revision (admin only).
+
+    Steps:
+      1. service.publish_revision() — set published_revision_id trong DB
+      2. Đồng bộ Redis cache với spec của revision đó (session create đọc từ
+         Redis) — admin "edit" trên Builtin không có effect production cho
+         đến khi Activate.
+    """
+    defn = await service.publish_revision(scenario_id, req.revision_id, user)
+
+    # Sync Redis với spec của revision vừa publish
+    rev = await service.get_revision(scenario_id, req.revision_id, user)
+    from scenarios.spec import ScenarioSpec
+    import json as _json
+    spec_data = _json.loads(rev.normalized_spec_json) if isinstance(rev.normalized_spec_json, str) else rev.normalized_spec_json
+    spec = ScenarioSpec.model_validate(spec_data)
+    redis = get_async_redis()
+    await legacy_scenario_service.save_async(redis, spec)
+
+    detail = await service.get_detail(scenario_id, user)
+    return ScenarioDetailResponse(
+        definition=_defn_to_resp(detail.definition),
+        latest_revision=_rev_summary(detail.latest_revision),
+        published_revision=_rev_summary(detail.published_revision),
+    )
 
 
 @router.get("/{scenario_id}/revisions", response_model=list[RevisionSummaryResponse])

@@ -109,6 +109,22 @@ def _check_hooks(spec: ScenarioSpec) -> list[ValidationError_]:
     return out
 
 
+def _check_goal(spec: ScenarioSpec) -> list[ValidationError_]:
+    """mode='agent' yêu cầu goal không rỗng — LLM cần instruction.
+    Exempt: scenario id='custom' chủ đích để goal trống cho request override."""
+    out = []
+    if spec.mode == "agent" and spec.id != "custom":
+        if not spec.goal or not str(spec.goal).strip():
+            out.append(ValidationError_(
+                field="goal",
+                message="mode='agent' yêu cầu trường 'goal' không rỗng — LLM "
+                        "cần instruction cụ thể để biết phải làm gì. Thêm "
+                        "'goal: |\\n  Mô tả task...' vào YAML, hoặc đổi sang "
+                        "mode='flow' và define 'steps'.",
+            ))
+    return out
+
+
 def _check_credentials(spec: ScenarioSpec) -> tuple[list, list]:
     """§3.5 credential protection.
     - password/secret field: default PHẢI rỗng → hard error
@@ -206,6 +222,7 @@ def normalize_yaml(
     warnings: list[ValidationError_] = []
     if not force_builtin:
         errors.extend(_check_hooks(spec))
+        errors.extend(_check_goal(spec))
         cred_errors, cred_warnings = _check_credentials(spec)
         errors.extend(cred_errors)
         warnings.extend(cred_warnings)
