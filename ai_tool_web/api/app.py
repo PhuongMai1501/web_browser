@@ -29,9 +29,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from api.exception_handlers import register_scenario_exception_handlers
 from api.recovery import recovery_loop
 from api.routes import (
-    auth, browser, cancel, health, input_fields, result, resume,
+    admin, auth, browser, cancel, health, input_fields, result, resume,
     scenario_generate, scenario_images, scenarios, screenshots, sessions,
-    stream, user_hooks, user_scenarios,
+    stream, tasks, user_hooks, user_scenarios,
 )
 from auth.mock_provider import MockAuthProvider
 from config import LOG_DIR
@@ -73,7 +73,9 @@ register_scenario_exception_handlers(app)
 # Register route modules.
 for _router_module in (
     health, sessions, stream, resume, cancel, browser, screenshots, result,
+    tasks,                              # /v1/tasks/{task_id}/run — task-centric primary
     auth,                               # /v1/auth/me — admin status check
+    admin,                              # /v1/admin/* — session/worker monitor (admin-only)
     user_scenarios, user_hooks,         # Phase 1 user CRUD (X-User-Id + SQLite)
     scenario_images,                    # Visual Hint Targeting Phase 1
     input_fields,                       # Phase 1 Input Fields Management

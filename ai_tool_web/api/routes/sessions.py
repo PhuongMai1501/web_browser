@@ -1,22 +1,157 @@
+import asyncio
 import json
+import logging
 import os
 import uuid
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Header, HTTPException
 
 from config import MAX_STEPS_CAP, MIN_STEPS
 from models import RunRequest, SessionCreatedResponse, SessionStatusResponse
 from services import scenario_service
+from services.scenario_generator import generate_yaml
 from services.scenario_service import ContextValidationError
 from services.yaml_normalizer import normalize_yaml
 from store import job_queue, session_store
 from store.redis_client import get_async_redis
 
 router = APIRouter()
+_log = logging.getLogger(__name__)
+
+# Session status nào không phải terminal — auto-cancel prev iterations chỉ
+# tác động đến các session này.
+_NON_TERMINAL = frozenset({"queued", "assigned", "running", "waiting_for_user"})
+
+# Task counter key trong Redis — INCR atomic để gán iteration number.
+_TASK_COUNTER_KEY = "task:{}:counter"
+
+# TTL cho task counter — keep dài hơn SESSION_TTL_S để tránh reset iteration
+# khi user comeback sau vài giờ. 24h là default reasonable.
+_TASK_COUNTER_TTL_S = 24 * 3600
+
+
+async def _cancel_prev_iterations(redis, task_id: str, new_session_id: str) -> int:
+    """Cancel mọi session non-terminal cùng task_id (trừ session đang tạo).
+
+    Pattern giống /v1/browser/kill-all nhưng scope theo task_id.
+    Worker check `cancel_requested` ở mỗi step → graceful exit (5-10s).
+    Session đang waiting_for_user → push cancel signal qua resume queue.
+
+    Returns: số session đã cancel.
+    """
+    if not task_id:
+        return 0
+
+    cancelled = 0
+    keys = await redis.keys("session:*")
+    for key in keys:
+        key_str = key.decode() if isinstance(key, bytes) else key
+        # Skip nested keys (session:{id}:screenshots, :annotated)
+        if key_str.count(":") > 1:
+            continue
+        sid = key_str.split(":", 1)[1]
+        if sid == new_session_id:
+            continue   # không tự cancel mình
+
+        sess = await session_store.get_async(redis, sid)
+        if not sess:
+            continue
+        if sess.get("task_id") != task_id:
+            continue
+        if sess.get("status") not in _NON_TERMINAL:
+            continue
+
+        # Mark cancel + giữ status để worker tự transition sang "cancelled"
+        # (không force status ở đây để worker có cơ hội ghi result.json).
+        await session_store.update_async(redis, sid, cancel_requested="1")
+
+        # Unblock waiting_for_user nếu có
+        if sess.get("status") == "waiting_for_user":
+            msg = json.dumps({"type": "cancel"}, ensure_ascii=False)
+            await redis.rpush(f"resume:{sid}", msg)
+
+        cancelled += 1
+        _log.info(
+            "Auto-cancelled session %s (task=%s, iter=%s) for new iteration %s",
+            sid, task_id, sess.get("iteration", "?"), new_session_id,
+        )
+    return cancelled
+
+
+async def _next_iteration(redis, task_id: str) -> int:
+    """INCR atomic counter cho task → trả iteration number cho session mới."""
+    if not task_id:
+        return 1
+    key = _TASK_COUNTER_KEY.format(task_id)
+    iteration = await redis.incr(key)
+    await redis.expire(key, _TASK_COUNTER_TTL_S)
+    return int(iteration)
+
+
+def _convert_missing_required_to_ask(spec, context):
+    """Đổi inputs[].source=context required nhưng thiếu trong request context
+    sang source=ask_user + prepend ask_user steps để worker hỏi user runtime
+    qua SSE thay vì reject 422.
+
+    Returns (new_spec, converted_names). Nếu không có gì đổi → trả về spec gốc.
+
+    Lưu ý: bỏ qua input đã có trong steps là `action: ask_user` (LLM YAML đôi
+    khi đã include sẵn) để không double-ask cùng 1 field.
+    """
+    ctx = context or {}
+    if not spec.inputs:
+        return spec, []
+
+    # Tập field đã có ask_user step → không cần prepend lại
+    existing_ask_fields = {
+        s.field for s in (spec.steps or []) if s.action == "ask_user" and s.field
+    }
+
+    new_inputs = []
+    converted: list[str] = []
+    converted_meta: list[tuple[str, str]] = []  # (name, prompt) để build ask_user steps
+    for inp in spec.inputs:
+        is_missing = (
+            inp.source == "context"
+            and inp.required
+            and (inp.name not in ctx or ctx[inp.name] in (None, ""))
+        )
+        if is_missing:
+            new_inputs.append(inp.model_copy(update={"source": "ask_user"}))
+            converted.append(inp.name)
+            if inp.name not in existing_ask_fields:
+                prompt = inp.description or f"Vui lòng nhập {inp.name}"
+                converted_meta.append((inp.name, prompt))
+        else:
+            new_inputs.append(inp)
+    if not converted:
+        return spec, []
+
+    # Build ask_user steps + prepend vào spec.steps. Dùng FlowStep từ module
+    # scenarios để Pydantic validate kèm các field default.
+    from scenarios.flow_models import FlowStep
+
+    ask_steps = [
+        FlowStep(action="ask_user", field=name, prompt=prompt)
+        for name, prompt in converted_meta
+    ]
+    new_steps = ask_steps + list(spec.steps or [])
+
+    return spec.model_copy(update={"inputs": new_inputs, "steps": new_steps}), converted
 
 
 @router.post("/v1/sessions", response_model=SessionCreatedResponse, status_code=201)
-async def create_session(req: RunRequest):
+async def create_session(
+    req: RunRequest,
+    x_user_id: str | None = Header(default=None, alias="X-User-Id"),
+):
+    """Tạo session iteration.
+
+    [Legacy endpoint — backward compat]
+    Sup Agent mới nên dùng `POST /v1/tasks/{task_id}/run` (task-centric).
+    Endpoint này vẫn hoạt động đầy đủ — task_id lấy từ body (auto-gen UUID
+    nếu rỗng). Sẽ deprecate sau khi WebUI migrate xong.
+    """
     redis = get_async_redis()
 
     if await job_queue.is_over_capacity(redis):
@@ -26,24 +161,74 @@ async def create_session(req: RunRequest):
     if not api_key:
         raise HTTPException(500, detail="OPENAI_API_KEY not set")
 
-    # Hai mode:
+    # Validate exactly 1 trong 3 mode được set rõ ràng. `scenario` có default
+    # "chang_login" → không count là explicit-set; coi như fallback nếu cả
+    # query và scenario_yaml đều rỗng.
+    explicit_modes = sum(1 for x in (req.scenario_yaml, req.query) if x)
+    if explicit_modes > 1:
+        raise HTTPException(
+            422,
+            detail="Chỉ được set 1 trong 2 field: 'scenario_yaml' hoặc 'query'.",
+        )
+
+    # Track xem YAML đến từ đâu để response trả về đúng metadata cho Sup Agent.
+    generated_from_query = False
+    gen_model_used: str = ""
+    gen_tokens_in: int = 0
+    gen_tokens_out: int = 0
+
+    # Mode `query` — LLM gen YAML rồi rơi xuống flow scenario_yaml chung.
+    # Sup Agent gửi NL description, API gen YAML, validate, chạy.
+    if req.query:
+        q = req.query.strip()
+        if not q:
+            raise HTTPException(422, detail="'query' không được rỗng.")
+        # generate_yaml gọi OpenAI sync (~3-5s) → off-thread để không block event loop.
+        gen = await asyncio.to_thread(
+            generate_yaml,
+            description=q,
+            site_hint=req.query_site_hint,
+        )
+        gen_model_used = gen.model
+        gen_tokens_in = gen.tokens_in
+        gen_tokens_out = gen.tokens_out
+        if not gen.ok:
+            raise HTTPException(
+                502,
+                detail=f"LLM generate fail: {gen.error}",
+            )
+        # Inject YAML đã gen vào scenario_yaml flow phía dưới — KHÔNG lưu DB,
+        # chỉ tồn tại trong scenario_config của session này.
+        req.scenario_yaml = gen.yaml
+        generated_from_query = True
+
+    # Hai mode (sau khi query đã chuyển thành scenario_yaml):
     #  - YAML inline: req.scenario_yaml set → parse ad-hoc spec, không cần DB lookup
     #  - DB lookup (default): scenario_service.get_async(req.scenario)
     if req.scenario_yaml:
-        # Auto-gen scenario id để tracking (không lưu DB)
-        custom_id = f"_custom_{uuid.uuid4().hex[:8]}"
+        # Auto-gen scenario id để tracking (không lưu DB).
+        # Prefix `_q_` cho YAML sinh từ query, `_custom_` cho YAML user paste —
+        # phân biệt trong log + admin monitor.
+        id_prefix = "_q_" if generated_from_query else "_custom_"
+        custom_id = f"{id_prefix}{uuid.uuid4().hex[:8]}"
         result = normalize_yaml(req.scenario_yaml, force_id=custom_id)
         if not result.parse_ok:
             error_msgs = [f"{e.field}: {e.message}" for e in result.errors]
             raise HTTPException(
                 422,
-                detail=f"YAML parse fail: {'; '.join(error_msgs)}",
+                detail=(
+                    f"YAML {'gen từ query' if generated_from_query else 'inline'} "
+                    f"parse fail: {'; '.join(error_msgs)}"
+                ),
             )
         if not result.validation_ok or result.spec is None:
             error_msgs = [f"{e.field}: {e.message}" for e in result.errors]
             raise HTTPException(
                 422,
-                detail=f"YAML validation fail: {'; '.join(error_msgs)}",
+                detail=(
+                    f"YAML {'gen từ query' if generated_from_query else 'inline'} "
+                    f"validation fail: {'; '.join(error_msgs)}"
+                ),
             )
         spec = result.spec
         # Override req.scenario để log nhất quán (kể cả user truyền tên khác)
@@ -72,6 +257,24 @@ async def create_session(req: RunRequest):
                     ctx_with_defaults[inp.name] = inp.default
         req.context = ctx_with_defaults
 
+    # Resolve ask_missing_inputs: explicit user choice > auto-enable cho query mode.
+    # Mode `query`: LLM gen YAML thường declare credentials inputs với source=context;
+    # user gõ NL không khai báo trước → fallback ask_user runtime để worker hỏi
+    # qua SSE thay vì reject 422.
+    if req.ask_missing_inputs is not None:
+        auto_ask = bool(req.ask_missing_inputs)
+    else:
+        auto_ask = generated_from_query
+
+    if auto_ask:
+        spec, converted = _convert_missing_required_to_ask(spec, req.context)
+        if converted:
+            _log.info(
+                "[%s] Auto-converted missing required inputs %s → ask_user "
+                "(generated_from_query=%s)",
+                req.scenario, converted, generated_from_query,
+            )
+
     try:
         scenario_service.validate_context(spec, req.context)
     except ContextValidationError as e:
@@ -97,14 +300,44 @@ async def create_session(req: RunRequest):
             scenario_config["callback_secret"] = req.callback_secret
         mode = "callback"
 
+    # Auto-fill name nếu user không truyền — fallback "<scenario>" để UI luôn có label.
+    session_name = (req.name or "").strip()[:120] if req.name else ""
+
+    # Task tracking — Sup Agent gửi task_id để group iterations. Nếu rỗng,
+    # API auto-gen UUID (đảm bảo mọi session đều có task_id, đơn giản hoá
+    # query phía admin). Limit 128 char (đã validate ở Pydantic Field).
+    task_id = (req.task_id or "").strip() or f"t-{uuid.uuid4().hex[:12]}"
+
+    # INCR atomic counter để gán iteration number. Race safe khi 2 POST
+    # cùng task_id đến đồng thời — mỗi POST nhận unique iteration.
+    iteration = await _next_iteration(redis, task_id)
+
+    # Auto-cancel iterations cũ non-terminal nếu user opt-in (default true).
+    # Pattern: user sửa YAML → tạo session mới → iteration cũ tự bị kill.
+    # cancel_prev_iterations=false dùng cho A/B benchmark (chạy song song).
+    cancelled_prev_count = 0
+    if req.cancel_prev_iterations:
+        cancelled_prev_count = await _cancel_prev_iterations(
+            redis, task_id, new_session_id=session_id,
+        )
+
     await session_store.create_async(
         redis,
         session_id=session_id,
         scenario=req.scenario,
         max_steps=max_steps,
         scenario_config=scenario_config,
+        name=session_name,
+        user_id=(x_user_id or "").strip(),
+        task_id=task_id,
+        iteration=iteration,
     )
     q_pos = await job_queue.push_job(redis, session_id)
+
+    # Chỉ trả scenario_yaml trong response khi YAML được sinh từ query — Sup
+    # Agent cần hiển thị cho user xem/sửa. Mode `scenario_yaml` user gửi sẵn
+    # rồi nên không cần echo lại; mode `scenario` (DB) không có YAML.
+    response_yaml = req.scenario_yaml if generated_from_query else None
 
     return SessionCreatedResponse(
         session_id=session_id,
@@ -113,6 +346,15 @@ async def create_session(req: RunRequest):
         mode=mode,
         created_at="",   # filled by session_store; return minimal info
         queue_position=q_pos,
+        scenario_yaml=response_yaml,
+        scenario_id=req.scenario if generated_from_query else None,
+        generated_from_query=generated_from_query,
+        model_used=gen_model_used or None,
+        tokens_in=gen_tokens_in or None,
+        tokens_out=gen_tokens_out or None,
+        task_id=task_id,
+        iteration=iteration,
+        cancelled_prev_count=cancelled_prev_count,
     )
 
 
@@ -127,6 +369,7 @@ async def get_session(session_id: str):
         session_id=sess["session_id"],
         status=sess["status"],
         scenario=sess["scenario"],
+        name=sess.get("name") or None,
         current_step=int(sess.get("current_step", 0)),
         max_steps=int(sess.get("max_steps", 0)),
         created_at=sess.get("created_at", ""),
@@ -134,4 +377,6 @@ async def get_session(session_id: str):
         ask_deadline_at=sess.get("ask_deadline_at") or None,
         error_msg=sess.get("error_msg") or None,
         finished_at=sess.get("finished_at") or None,
+        task_id=sess.get("task_id") or None,
+        iteration=int(sess["iteration"]) if sess.get("iteration") else None,
     )

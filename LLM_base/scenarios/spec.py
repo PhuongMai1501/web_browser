@@ -62,4 +62,9 @@ class ScenarioSpec(BaseModel):
     # Prompt tuning (dùng ở mode=agent / hybrid)
     system_prompt_extra: str = ""
 
+    # JSON Schema mô tả output mà step `action: extract_data` sẽ điền.
+    # Khi flow chạy xong, worker merge data đã extract vào result.json["data"].
+    # None hoặc {} = không có extract data → result.json không có field "data".
+    output_schema: dict = Field(default_factory=dict)
+
     hooks: ScenarioHooks = Field(default_factory=ScenarioHooks)

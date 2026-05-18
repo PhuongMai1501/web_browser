@@ -38,12 +38,20 @@ async def create_async(
     max_steps: int,
     scenario_config: dict,
     client_id: str = "",
+    name: str = "",
+    user_id: str = "",
+    task_id: str = "",
+    iteration: int = 1,
 ) -> None:
     key = _SESSION_KEY.format(session_id)
     await redis.hset(key, mapping={
         "session_id": session_id,
         "status": "queued",
         "scenario": scenario,
+        "name": name,
+        "user_id": user_id,
+        "task_id": task_id,
+        "iteration": str(iteration),
         "current_step": "0",
         "max_steps": str(max_steps),
         "created_at": _now(),
@@ -61,6 +69,25 @@ async def create_async(
         "client_id": client_id,
     })
     await redis.expire(key, SESSION_TTL_S)
+
+
+async def list_async(redis: Redis) -> list[dict]:
+    """List toàn bộ session đang lưu Redis (bỏ qua nested keys :screenshots/:annotated).
+
+    Trả về list theo thứ tự bất kỳ — caller tự sort theo created_at nếu cần.
+    Dùng cho admin endpoint; KHÔNG dùng cho hot path API.
+    """
+    keys = await redis.keys("session:*")
+    out: list[dict] = []
+    for key in keys:
+        key_str = key.decode() if isinstance(key, bytes) else key
+        # Bỏ qua nested key (session:{id}:screenshots, :annotated)
+        if key_str.count(":") > 1:
+            continue
+        data = await redis.hgetall(key_str)
+        if data:
+            out.append(data)
+    return out
 
 
 async def get_async(redis: Redis, session_id: str) -> dict | None:

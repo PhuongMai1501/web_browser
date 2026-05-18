@@ -33,6 +33,7 @@ def run_scenario(
     *,
     goal_override: Optional[str] = None,
     url_override: Optional[str] = None,
+    output_holder: Optional[dict] = None,
 ) -> Generator[StepRecord, Optional[str], None]:
     """Generator thống nhất cho mọi scenario.
 
@@ -67,6 +68,7 @@ def run_scenario(
                 session_id=session_id,
                 browser=browser,
                 api_key=api_key,
+                output_holder=output_holder,
             )
         finally:
             if domain_override_set:

@@ -113,15 +113,52 @@ steps:
 
 CÁC ACTION HỢP LỆ:
 - click: click element. Cần `target: {role, text_any}`.
-- fill: nhập text vào textbox. Cần `target` và `value_from: <input_name>`.
+- fill: nhập text vào textbox. Cần `target` + CHỌN 1 TRONG 2:
+    + value: <literal string>      — text gõ trực tiếp (search keyword, URL,
+                                      số hiệu cố định, label hardcoded).
+                                      VD: value: "Giá iPhone 15"
+    + value_from: <input_name>     — tên 1 input đã declare trong `inputs:`.
+                                      VD: value_from: username
+  ⚠️ QUAN TRỌNG — sai cú pháp value_from là LỖI THƯỜNG GẶP:
+     - value_from CHỈ NHẬN identifier (a-z, _, 0-9) match đúng tên 1 input.
+     - KHÔNG dùng value_from cho literal text có space/dấu/tiếng Việt.
+     - SAI: `value_from: "Giá iPhone 15"` → worker fail "Context không có field".
+     - ĐÚNG: `value: "Giá iPhone 15"` (literal) HOẶC khai báo
+       `inputs: [{name: keyword, default: "Giá iPhone 15"}]` rồi `value_from: keyword`.
 - wait_for: chờ element xuất hiện. Cần `target`, optional `timeout_ms` (default 30000).
 - open_link: mở link same-tab. Như click nhưng đảm bảo navigation.
 - if_visible: branch theo target có visible không. Có `then: [...]` và `else: [...]`.
+- ask_user: hỏi user runtime. Cần `field: <input_name>` + `prompt: <câu hỏi>`. Worker phát SSE event ask, đợi user POST /resume.
 - eval_js: chạy JS script. Cần `script: <code>`. Workaround cho inline onclick handler.
 - upload_download: poll file download xong, upload lên CDN, xóa local. Optional `extensions: [...]`, `timeout_ms`.
+- extract_data: LLM extract data từ DOM theo top-level `output_schema`. Cần đặt CUỐI flow. Optional `prompt: <instruction>`.
 
 ROLE HỢP LỆ TRONG target:
-- button, link, textbox, image, heading
+- button, link, textbox, combobox, searchbox, textarea, image, heading
+
+⚠️ CHỌN ROLE CHO INPUT — nhiều site dùng ARIA role khác nhau cho cùng "ô gõ chữ":
+- Google / Bing / YouTube / Facebook search box → `combobox` (vì có autocomplete dropdown)
+- HTML5 search input chuẩn (`<input type="search">`) → `searchbox`
+- Form input thường (login, register, payment) → `textbox`
+- Rich editor (Gmail compose body, Twitter tweet box, Notion block) → `textbox`
+  (vì là `<div contenteditable>` nên ARIA tree expose là textbox)
+- `<textarea>` HTML → `textarea`
+
+KHI KHÔNG CHẮC: dùng `textbox` mặc định — worker có fallback tự động thử
+combobox / searchbox / textarea nếu textbox không match. Tuy nhiên đoán
+đúng role ngay từ đầu giúp giảm latency 1 vòng fallback.
+
+CHEAT SHEET site phổ biến:
+| Site/Loại                          | Role chuẩn  |
+|------------------------------------|-------------|
+| Google.com / Bing.com search       | combobox    |
+| YouTube search                     | combobox    |
+| Facebook / Twitter search          | combobox    |
+| HTML5 `<input type="search">`      | searchbox   |
+| Login form (email, password)       | textbox     |
+| Form đăng ký, thanh toán           | textbox     |
+| Gmail compose body, chat editor    | textbox     |
+| `<textarea>` comment box           | textarea    |
 
 TEXT_ANY:
 - List các text NHÌN THẤY được trên UI (tiếng Việt).
@@ -133,21 +170,106 @@ INPUTS RULES:
 - Nếu type=secret → tool-web tự mask trong log.
 - Có thể đặt `default: <value>` để bypass require khi missing context (chỉ test mode).
 
+OUTPUT JSON ĐỘNG (output_schema + action extract_data):
+
+Khi user yêu cầu output có FORMAT cụ thể (vd "trả về JSON với tên, giá, web bán"),
+PHẢI:
+
+1. Thêm top-level field `output_schema` (JSON Schema chuẩn) NGAY SAU `max_steps_default`:
+
+   ```yaml
+   output_schema:
+     type: object
+     properties:
+       name:    { type: string, description: "Tên sản phẩm" }
+       price:   { type: string, description: "Giá kèm đơn vị tiền tệ" }
+       seller:  { type: string, description: "Tên trang web bán" }
+       url:     { type: string, description: "Link trang sản phẩm" }
+     required: [name, price, seller, url]
+     additionalProperties: false
+   ```
+
+   QUAN TRỌNG:
+   - `required` phải liệt kê TẤT CẢ property keys (OpenAI strict mode).
+   - `additionalProperties: false` (OpenAI strict mode).
+   - Mỗi property phải có `description` rõ ràng — LLM extract sẽ dùng làm hint.
+   - Type cơ bản: string, number, integer, boolean, array, object.
+     Nested object phải có `additionalProperties: false` + `required` đầy đủ.
+
+2. Thêm step `action: extract_data` ở CUỐI flow (sau khi đã navigate tới trang
+   có data cần lấy):
+
+   ```yaml
+   - action: extract_data
+     prompt: "Đọc trang sản phẩm này và trả về thông tin theo schema"
+     note: "Extract product info"
+   ```
+
+   `prompt` (optional): hướng dẫn cụ thể cho LLM extract. Nếu thiếu,
+   dùng default "Đọc nội dung trang và extract theo schema".
+
+KHI NÀO BỎ output_schema + extract_data:
+- User KHÔNG yêu cầu output JSON cụ thể.
+- Task chỉ là thao tác (click, fill, login) — không cần lấy data về.
+
 COMMON PATTERNS:
 
-1. Login form (skip nếu đã login):
-   - if_visible với target check link "Trang cá nhân"/"Thoát" (success marker)
+⚠️ KHI NÀO CẦN LOGIN — KHÔNG MẶC ĐỊNH THÊM LOGIN FLOW:
+- User nói "đăng nhập <site>": chỉ thêm login nếu trang đó BẮT BUỘC login để
+  truy cập tính năng (vd: thuvienphapluat đọc full text, chang.fpt.net dashboard).
+- Search engine (Google, Bing, DuckDuckGo, Cốc Cốc): KHÔNG cần login.
+- Trang công khai (Wikipedia, báo điện tử, e-commerce product page): KHÔNG cần login.
+- Câu "đăng nhập google" trong NL của user thường nghĩa "truy cập google" —
+  KHÔNG phải đăng nhập Google Account. Tránh tự ý thêm form login Gmail.
+- Khi không chắc → BỎ login flow + KHÔNG khai báo inputs username/password.
+  Để user explicit yêu cầu login mới thêm.
+
+1. Login form (CHỈ khi user yêu cầu rõ HOẶC site bắt buộc):
+   - if_visible với target check link "Trang cá nhân"/"Thoát" (success marker — đã login)
    - then: [] (đã login → skip)
    - else: wait_for textbox → fill user → fill password → click submit
             → if_visible popup "Đồng ý" → click nếu có → wait_for success marker
+   - inputs: khai báo username (string), password (secret), source=context.
 
-2. Search:
-   - fill keyword vào textbox
-   - click button submit
-   - eval_js force inline onclick nếu site dùng onclick="" handler
-   - wait_for kết quả render
+2. Search engine (Google, Bing, ...) — KHÔNG login, KHÔNG inputs credentials:
+   - fill ô search với `value: "<keyword>"` (literal, KHÔNG value_from).
+     Hoặc khai báo `inputs: [{name: keyword, default: "<keyword>"}]` rồi `value_from: keyword`.
+   - click button submit ("Tìm kiếm", "Google Search", "Tìm trên Google").
+     Hoặc gửi Enter (chỉ cần fill rồi wait_for kết quả).
+   - wait_for kết quả render (heading "Kết quả tìm kiếm" / link tới site).
+   - open_link nth=0 (link đầu tiên, organic result).
+   - wait_for trang đích render (heading sản phẩm/bài viết).
+   - extract_data nếu user yêu cầu JSON output.
 
-3. Download document:
+   VÍ DỤ:
+     ```yaml
+     id: search_iphone_price
+     mode: flow
+     start_url: https://www.google.com
+     allowed_domains: [google.com]
+     # KHÔNG khai báo inputs username/password ở đây
+     output_schema: {...}
+     steps:
+       - action: fill
+         target: { role: combobox, text_any: ["Tìm kiếm"] }
+         value: "Giá iPhone 15"             # ← literal, dùng `value`
+       - action: click
+         target: { role: button, text_any: ["Tìm trên Google", "Google Search"] }
+       - action: wait_for
+         target: { role: heading, text_any: ["Kết quả"] }
+       - action: open_link
+         target: { role: link, nth: 0 }
+       - action: wait_for
+         target: { role: heading }
+       - action: extract_data
+         prompt: "Đọc trang sản phẩm và trả về thông tin"
+     ```
+
+3. Form site có login bắt buộc + search:
+   - Login flow (xem pattern 1)
+   - Sau wait_for success marker mới fill keyword search.
+
+4. Download document:
    - click tab "Tải về"
    - eval_js force inline onclick (nhiều site cần)
    - wait_for menu variant render

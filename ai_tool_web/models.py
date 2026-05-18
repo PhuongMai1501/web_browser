@@ -20,6 +20,7 @@ class RunRequest(BaseModel):
     # Nếu `scenario_yaml` được set, tool-web bỏ qua DB lookup và dùng YAML
     # inline trực tiếp; `scenario` khi đó chỉ là tên hiển thị cho log.
     scenario: str = "chang_login"
+    name: Optional[str] = Field(default=None, max_length=120)  # label hiển thị màn admin
     goal: Optional[str] = None           # override goal của spec (như custom cũ)
     url: Optional[str] = None            # override start_url của spec
     context: Optional[dict] = None       # {"email": "...", "password": "..."}
@@ -30,6 +31,29 @@ class RunRequest(BaseModel):
     # tạo scenario trong DB trước. Tool-web parse + validate qua yaml_normalizer,
     # tạo spec ad-hoc (không lưu DB), bỏ qua DB lookup scenario.
     scenario_yaml: Optional[str] = None
+    # Query mode — user gõ NL description tự nhiên, API tự gọi LLM gen YAML
+    # rồi chạy luôn. YAML đã gen trả về trong SessionCreatedResponse.scenario_yaml
+    # để Sup Agent hiển thị editor cho user xem/sửa rồi chạy lại bằng mode
+    # scenario_yaml. Chỉ 1 trong 3 mode được set tại 1 thời điểm.
+    query: Optional[str] = None
+    query_site_hint: Optional[str] = None   # optional: domain hint cho LLM (vd "chang.fpt.net")
+    # Nếu True: với các inputs[].required+source=context thiếu trong request
+    # context, tool-web TỰ ĐỘNG đổi sang source=ask_user để worker hỏi user
+    # runtime qua SSE thay vì reject 422. Default None → auto-enable cho mode
+    # `query` (vì user gõ NL thường không khai báo trước credentials), tắt
+    # cho mode `scenario`/`scenario_yaml` để giữ behavior cũ.
+    ask_missing_inputs: Optional[bool] = None
+    # Task tracking — group nhiều session iterations (lần thử) cho cùng 1 yêu
+    # cầu của end-user. Sup Agent sinh task_id 1 lần khi user mở chat, gửi
+    # kèm mọi POST /v1/sessions tiếp theo. Nếu rỗng → API auto-gen UUID.
+    # Có thể dùng external_id (vd Sup Agent's conversation_id, Linear ticket)
+    # làm task_id để cross-trace.
+    task_id: Optional[str] = Field(default=None, max_length=128)
+    # Nếu True (default): khi tạo session với task_id, API tự cancel mọi
+    # session non-terminal CÙNG task_id để giải phóng worker. User loop sửa
+    # YAML → iteration cũ tự bị kill, không tốn worker. Set False khi muốn
+    # chạy parallel iteration (A/B benchmark).
+    cancel_prev_iterations: bool = True
 
 
 class ResumeRequest(BaseModel):
@@ -100,12 +124,30 @@ class SessionCreatedResponse(BaseModel):
     mode: str = "sse"                    # "sse" | "callback"
     created_at: str
     queue_position: Optional[int] = None
+    # Khi tạo session bằng mode `query`, API trả lại YAML đã LLM-generate
+    # để Sup Agent hiển thị cho user xem/sửa rồi chạy lại bằng mode scenario_yaml.
+    # Rỗng cho mode `scenario` và `scenario_yaml`.
+    scenario_yaml: Optional[str] = None
+    scenario_id: Optional[str] = None    # id auto-gen của YAML ad-hoc (vd "_q_abc123")
+    generated_from_query: bool = False   # True nếu YAML được sinh từ query
+    model_used: Optional[str] = None     # model LLM dùng gen (vd "gpt-4o-mini")
+    tokens_in: Optional[int] = None
+    tokens_out: Optional[int] = None
+    # Task tracking — Sup Agent dùng để group session iterations.
+    # task_id = Sup Agent gửi (nếu có), hoặc API auto-gen UUID.
+    # iteration = số thứ tự lần thử trong task (1, 2, 3...).
+    task_id: str = ""
+    iteration: int = 1
+    # cancelled_prev_count = số iteration cũ đã bị auto-cancel khi tạo cái này.
+    # 0 nếu không có iteration trước, hoặc cancel_prev_iterations=false.
+    cancelled_prev_count: int = 0
 
 
 class SessionStatusResponse(BaseModel):
     session_id: str
     status: str   # queued|assigned|running|waiting_for_user|done|failed|cancelled|timed_out
     scenario: str
+    name: Optional[str] = None
     current_step: int
     max_steps: int
     created_at: str
@@ -113,11 +155,60 @@ class SessionStatusResponse(BaseModel):
     ask_deadline_at: Optional[str] = None
     error_msg: Optional[str] = None
     finished_at: Optional[str] = None
+    # Task tracking — đồng bộ với SessionCreatedResponse
+    task_id: Optional[str] = None
+    iteration: Optional[int] = None
     # Legacy fields kept for UI compatibility
     blocked_at: Optional[str] = None
     blocked_message: Optional[str] = None
     completed_at: Optional[str] = None
     duration_seconds: Optional[float] = None
+
+
+# ── Admin endpoint payloads ────────────────────────────────────────────────────
+
+class AdminSessionItem(BaseModel):
+    """1 row trong màn admin — list session đang chạy."""
+    session_id: str
+    status: str
+    scenario: str
+    name: Optional[str] = None
+    user_id: Optional[str] = None
+    task_id: Optional[str] = None        # Task grouping (phase task_id)
+    iteration: Optional[int] = None      # Iteration trong task (1, 2, 3...)
+    current_step: int = 0
+    max_steps: int = 0
+    assigned_worker: Optional[str] = None
+    created_at: str = ""
+    started_at: Optional[str] = None
+    finished_at: Optional[str] = None
+    error_msg: Optional[str] = None
+
+
+class AdminWorkerItem(BaseModel):
+    worker_id: str
+    status: str          # "idle" | "busy" | "unknown"
+    current_session: Optional[str] = None
+    started_at: Optional[str] = None
+    last_heartbeat: Optional[str] = None
+    seconds_since_heartbeat: Optional[float] = None
+
+
+class AdminSessionsResponse(BaseModel):
+    sessions: list[AdminSessionItem]
+    total: int
+    workers_alive: int
+    workers_busy: int
+    queue_length: int
+
+
+class TaskSessionsResponse(BaseModel):
+    """Response cho GET /v1/tasks/{task_id}/sessions — list iterations."""
+    task_id: str
+    iterations: list[AdminSessionItem]   # sort theo iteration tăng dần
+    total: int
+    has_running: bool                    # còn iteration non-terminal không
+    latest_iteration: int                # iteration number lớn nhất
 
 
 class ResumeResponse(BaseModel):

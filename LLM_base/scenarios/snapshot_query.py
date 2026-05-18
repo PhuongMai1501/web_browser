@@ -9,16 +9,42 @@ Snapshot của agent-browser có format mỗi dòng kiểu:
 
 Matcher parse thành record rồi khớp theo text_any / label_any /
 placeholder_any / role. Không cần LLM cho case đơn giản.
+
+Role compatibility (Cách 2a — cross-role fallback):
+Nhiều site dùng ARIA role khác nhau cho cùng 1 loại UI element:
+  - Google/Bing/YouTube search box → combobox (vì có autocomplete dropdown)
+  - HTML5 search input semantic   → searchbox
+  - Form input thường              → textbox
+  - Rich editor (Gmail, Twitter)   → textbox (contenteditable)
+  - Button styled as link / vice versa
+LLM gen YAML thường đoán `role: textbox` mặc định → fail trên search engines.
+Matcher tự fallback sang role compatible khi exact match rỗng (2-pass).
 """
 
 from __future__ import annotations
 
+import logging
 import re
 import unicodedata
 from dataclasses import dataclass, field
 from typing import Iterable, Optional
 
 from .flow_models import TargetSpec
+
+_log = logging.getLogger(__name__)
+
+# Role nào có thể thay thế role nào khi exact match fail. Pass 2 thử theo
+# thứ tự — return ngay khi match đầu tiên có element.
+# Lưu ý: role hai chiều — combobox fallback textbox và ngược lại — vì LLM
+# có thể đoán nhầm cả 2 chiều.
+_ROLE_FALLBACKS: dict[str, list[str]] = {
+    "textbox":   ["combobox", "searchbox", "textarea"],
+    "combobox":  ["textbox", "searchbox"],
+    "searchbox": ["textbox", "combobox"],
+    "textarea":  ["textbox"],
+    "button":    ["link"],          # link styled as button
+    "link":      ["button"],        # button styled as link
+}
 
 
 # Snapshot agent-browser format (accessibility tree, YAML-ish):
@@ -187,12 +213,41 @@ def _match_one(rec: ElementRecord, target: TargetSpec) -> bool:
 
 
 def find_refs(snapshot: str, target: TargetSpec) -> list[str]:
-    """Tìm tất cả ref khớp target. Trả list theo thứ tự xuất hiện trong snapshot."""
+    """Tìm tất cả ref khớp target. Trả list theo thứ tự xuất hiện trong snapshot.
+
+    2-pass strategy (Cách 2a):
+      1. Exact role match (giữ behavior cũ).
+      2. Nếu pass 1 rỗng + target.role có fallback → thử lần lượt fallback roles.
+         Mỗi fallback dùng chính TargetSpec với role override, tất cả filter
+         khác (text_any, label_any, placeholder_any) giữ nguyên.
+
+    Lý do: LLM gen YAML đôi khi đoán role sai (search Google = combobox chứ
+    không phải textbox). Fallback tránh fail runtime + ép user phải sửa YAML.
+    """
     if target.css:
         # Layer này không xử lý css → trả rỗng, caller có thể raise tuỳ context
         return []
     recs = parse_snapshot(snapshot)
-    return [r.ref for r in recs if _match_one(r, target)]
+
+    # Pass 1: exact role match
+    exact = [r.ref for r in recs if _match_one(r, target)]
+    if exact or not target.role:
+        return exact
+
+    # Pass 2: cross-role fallback. Chỉ kick in khi pass 1 rỗng + role có
+    # fallback group. Giữ tất cả filter khác.
+    fallbacks = _ROLE_FALLBACKS.get(target.role.lower(), [])
+    for alt_role in fallbacks:
+        target_alt = target.model_copy(update={"role": alt_role})
+        refs = [r.ref for r in recs if _match_one(r, target_alt)]
+        if refs:
+            _log.info(
+                "find_refs: cross-role fallback hit — target.role=%s → %s "
+                "(matched %d refs)",
+                target.role, alt_role, len(refs),
+            )
+            return refs
+    return []
 
 
 def find_ref(snapshot: str, target: TargetSpec) -> Optional[str]:

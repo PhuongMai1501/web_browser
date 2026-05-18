@@ -94,15 +94,36 @@ class ArtifactUploader:
 
     def should_upload(self, record) -> bool:
         """
-        Upload policy: upload mọi step có screenshot.
+        Upload policy.
 
-        Trước đây chỉ upload step "quan trọng" (ask/done/error/redirect) để
-        tiết kiệm bandwidth, nhưng dẫn tới đa số step click/type/scroll không
-        có ảnh trên CDN → UI 404 silent. Multi-pod K8s không share volume nên
-        fallback local path từ API pod cũng fail. Bandwidth nội bộ MinIO không
-        phải vấn đề, debug/audit cần ảnh đầy đủ → upload tất cả.
+        Upload khi:
+          - Agent bị block (ask)
+          - Agent hoàn thành (done)
+          - Step có lỗi
+          - URL thay đổi (redirect xảy ra — dấu hiệu action quan trọng)
+
+        Bỏ qua:
+          - Step wait
+          - Step click/type thông thường không có redirect
         """
-        return True
+        action_type = ""
+        if isinstance(record.action, dict):
+            action_type = record.action.get("action", "")
+
+        if record.is_blocked or record.is_done:
+            return True
+        if getattr(record, "error", ""):
+            return True
+        url_changed = (
+            getattr(record, "url_before", "")
+            and getattr(record, "url_after", "")
+            and record.url_before != record.url_after
+        )
+        if url_changed:
+            return True
+        if action_type == "wait":
+            return False
+        return False
 
     # ── Internal ───────────────────────────────────────────────────────────────
 

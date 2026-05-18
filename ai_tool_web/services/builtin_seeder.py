@@ -26,9 +26,9 @@ _log = logging.getLogger(__name__)
 
 
 def _default_builtin_dir() -> Path:
-    # Tìm builtin YAML ở 2 chỗ — bundled scenarios/builtin (production:
-    # agent_browser/scenarios/builtin, sys.path[0] khi WORKDIR /app/agent_browser)
-    # trước, fallback LLM_base/scenarios/builtin (dev legacy).
+    # Tìm builtin YAML ở 2 chỗ — agent_browser/scenarios/builtin (bundled trong
+    # image, sys.path[0] khi uvicorn chạy WORKDIR /app/agent_browser) trước,
+    # fallback LLM_base/scenarios/builtin (legacy dev path).
     here = Path(__file__).resolve()
     bundled = here.parent.parent / "scenarios" / "builtin"
     if bundled.exists():

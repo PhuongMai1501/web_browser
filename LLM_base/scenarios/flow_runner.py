@@ -97,6 +97,9 @@ class FlowRuntime:
     last_snapshot: str = ""
     step_count: int = 0
     run_dir: Optional[Path] = None
+    # Dict shared với caller để expose extracted_data ra ngoài generator.
+    # Action `extract_data` ghi vào `output_holder["data"]`.
+    output_holder: Optional[dict] = None
     # Visual Hint Targeting (Phase 4) — vision matcher fallback config
     api_key: str = ""                                # OpenAI key cho vision call
     vision_calls_used: int = 0
@@ -388,12 +391,16 @@ def run_flow(
     session_id: str = "",
     browser=None,
     api_key: str = "",
+    output_holder: Optional[dict] = None,
 ) -> Generator[StepRecord, Optional[str], None]:
     """Generator thực thi flow. Tương thích protocol với `run_agent_autonomous`:
     caller làm `gen.send(answer)` khi nhận record `is_blocked=True`.
 
     `api_key` cần thiết cho vision matcher fallback (TargetSpec.image_hint).
     Truyền rỗng → vision fallback bị skip (text-only matching).
+
+    `output_holder` cho phép caller thu data từ action `extract_data`.
+    Truyền 1 dict — runtime ghi vào `output_holder["data"]`.
     """
     rt = FlowRuntime(
         browser=browser or browser_module,
@@ -401,6 +408,7 @@ def run_flow(
         context=dict(context or {}),
         session_id=session_id,
         run_dir=_make_run_dir(),
+        output_holder=output_holder,
         api_key=api_key,
         vision_calls_cap=int(os.getenv("VISION_CALLS_PER_SESSION", "5")),
         _secret_fields=_build_secret_set(spec),
