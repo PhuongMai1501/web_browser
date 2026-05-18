@@ -161,14 +161,14 @@ async def create_session(
     if not api_key:
         raise HTTPException(500, detail="OPENAI_API_KEY not set")
 
-    # Validate exactly 1 trong 3 mode được set rõ ràng. `scenario` có default
-    # "chang_login" → không count là explicit-set; coi như fallback nếu cả
-    # query và scenario_yaml đều rỗng.
-    explicit_modes = sum(1 for x in (req.scenario_yaml, req.query) if x)
-    if explicit_modes > 1:
-        raise HTTPException(
-            422,
-            detail="Chỉ được set 1 trong 2 field: 'scenario_yaml' hoặc 'query'.",
+    # Cả scenario_yaml + query cùng có: ưu tiên scenario_yaml, bỏ qua query.
+    # Pattern Sup Agent: cache YAML rồi resend kèm query gốc để audit/log,
+    # không tốn LLM call lại. Query khi đó chỉ là metadata.
+    if req.scenario_yaml and req.query:
+        _log.info(
+            "[task=%s] Both scenario_yaml + query set → use scenario_yaml, "
+            "ignore query (kept as audit metadata: %r)",
+            req.task_id or "(auto)", req.query[:100],
         )
 
     # Track xem YAML đến từ đâu để response trả về đúng metadata cho Sup Agent.
@@ -179,7 +179,9 @@ async def create_session(
 
     # Mode `query` — LLM gen YAML rồi rơi xuống flow scenario_yaml chung.
     # Sup Agent gửi NL description, API gen YAML, validate, chạy.
-    if req.query:
+    # CHỈ gen khi scenario_yaml CHƯA có — nếu Sup Agent gửi sẵn YAML (cache),
+    # skip LLM call để tiết kiệm cost/latency.
+    if req.query and not req.scenario_yaml:
         q = req.query.strip()
         if not q:
             raise HTTPException(422, detail="'query' không được rỗng.")
@@ -214,6 +216,15 @@ async def create_session(
         result = normalize_yaml(req.scenario_yaml, force_id=custom_id)
         if not result.parse_ok:
             error_msgs = [f"{e.field}: {e.message}" for e in result.errors]
+            # Log warning nếu YAML hỏng mà backend kèm query — debug sau dễ
+            # trace query gốc dẫn đến YAML cache bị corrupt.
+            if req.query and not generated_from_query:
+                _log.warning(
+                    "[task=%s] YAML invalid + có query=%r → fail-fast 422 "
+                    "(không fallback LLM gen). Errors: %s",
+                    req.task_id or "(auto)", req.query[:100],
+                    "; ".join(error_msgs),
+                )
             raise HTTPException(
                 422,
                 detail=(
@@ -223,6 +234,13 @@ async def create_session(
             )
         if not result.validation_ok or result.spec is None:
             error_msgs = [f"{e.field}: {e.message}" for e in result.errors]
+            if req.query and not generated_from_query:
+                _log.warning(
+                    "[task=%s] YAML invalid (validation) + có query=%r → fail-fast 422. "
+                    "Errors: %s",
+                    req.task_id or "(auto)", req.query[:100],
+                    "; ".join(error_msgs),
+                )
             raise HTTPException(
                 422,
                 detail=(
