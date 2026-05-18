@@ -63,17 +63,21 @@ class ArtifactUploader:
         session_id: str,
         step: int,
         suffix: str = "",
+        task_id: str = "",
     ) -> str | None:
         """
         Upload 1 screenshot PNG.
 
-        dir:  tool-web/prod/sessions/{date}/{session_id}/screenshots
+        dir:
+          tool-web/prod/sessions/{date}/{task_id}/{session_id}/screenshots  (task-centric)
+          tool-web/prod/sessions/{date}/{session_id}/screenshots             (legacy, khi task_id="")
         file: step-{step:03d}{suffix}.png  (keepOriginalName=true)
         Trả về CDN URL hoặc None nếu fail.
         Xóa local file sau khi upload thành công.
         """
         date_str = datetime.now(timezone.utc).strftime("%Y/%m/%d")
-        remote_dir = f"public/tool-web/prod/sessions/{date_str}/{session_id}/screenshots"
+        subpath = f"{task_id}/{session_id}" if task_id else session_id
+        remote_dir = f"public/tool-web/prod/sessions/{date_str}/{subpath}/screenshots"
         # Đổi tên file local thành step-{n}{suffix}.png trước khi upload
         target_name = f"step-{step:03d}{suffix}.png"
         local_path = _rename_for_upload(local_path, target_name)
@@ -226,10 +230,18 @@ def _rename_for_upload(local_path: str, target_name: str) -> str | None:
         return local_path  # fallback: dùng tên gốc
 
 
-def build_artifact_remote_path(session_id: str, filename: str) -> str:
-    """Tạo remote path chuẩn cho artifact (result.json, session.jsonl)."""
+def build_artifact_remote_path(session_id: str, filename: str, task_id: str = "") -> str:
+    """Tạo remote path chuẩn cho artifact (result.json, session.jsonl).
+
+    Với task_id: tool-web/prod/sessions/{date}/{task_id}/{session_id}/{filename}
+    Không task_id (legacy): tool-web/prod/sessions/{date}/{session_id}/{filename}
+
+    Group folder theo task_id giúp dễ trace nhiều iteration cùng task (Sup
+    Agent loop sửa YAML — task=conversation, session=iteration).
+    """
     date_str = datetime.now(timezone.utc).strftime("%Y/%m/%d")
-    return f"public/tool-web/prod/sessions/{date_str}/{session_id}/{filename}"
+    subpath = f"{task_id}/{session_id}" if task_id else session_id
+    return f"public/tool-web/prod/sessions/{date_str}/{subpath}/{filename}"
 
 
 # Singleton — dùng chung trong cùng process

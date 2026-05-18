@@ -82,7 +82,8 @@ def _copy_runner_session_json(
     session_dir: Path,
     uploader,
     session_start: float,
-) -> None:
+    task_id: str = "",
+) -> str:
     """Tìm session.json mới nhất trong LLM_base/artifacts/* khớp session_id,
     copy sang session_dir và upload lên CDN.
 
@@ -90,6 +91,10 @@ def _copy_runner_session_json(
     không theo session_id. Cần scan + match qua field session_id trong file.
 
     Verbose log để debug — log_svc + Redis status key cho phép check qua API.
+
+    Returns: CDN URL của session.json sau upload (rỗng nếu fail/skip).
+             Caller (_persist_artifacts) ghi URL này vào result.json để Sup
+             Agent fetch rich diagnostic mà không phải đoán URL pattern.
     """
     log_svc = get_log_service()
     status: dict = {"step": "start"}
@@ -103,7 +108,7 @@ def _copy_runner_session_json(
             log_svc.log_session(session_id, "session_json_copy_skip",
                                 reason="LLM_base/artifacts not found",
                                 **status)
-            return
+            return ""
 
         # KHÔNG filter mtime — scan all session.json files để tránh miss
         # (clock skew giữa container và FS có thể khiến mtime threshold sai)
@@ -129,17 +134,18 @@ def _copy_runner_session_json(
             log_svc.log_session(session_id, "session_json_copy_skip",
                                 reason="No matching session_id",
                                 **status)
-            return
+            return ""
 
         dst = session_dir / "session.json"
         session_dir.mkdir(parents=True, exist_ok=True)
         dst.write_bytes(matched_path.read_bytes())
         status["copied_to"] = str(dst)
 
+        cdn_url = ""
         if uploader:
             from services.artifact_uploader import build_artifact_remote_path
-            remote = build_artifact_remote_path(session_id, "session.json")
-            cdn_url = uploader.upload_artifact(str(dst), remote)
+            remote = build_artifact_remote_path(session_id, "session.json", task_id=task_id)
+            cdn_url = uploader.upload_artifact(str(dst), remote) or ""
             status["upload_remote"] = remote
             status["cdn_url"] = cdn_url or "(returned None)"
         else:
@@ -147,6 +153,7 @@ def _copy_runner_session_json(
             status["cdn_url"] = "(uploader=None)"
 
         log_svc.log_session(session_id, "session_json_copy_ok", **status)
+        return cdn_url
     except Exception as e:
         status["error"] = f"{type(e).__name__}: {e}"
         try:
@@ -154,6 +161,7 @@ def _copy_runner_session_json(
         except Exception:
             pass
         _log.warning(f"[{session_id}] _copy_runner_session_json error: {e}")
+        return ""
 
 
 def _is_cancelled(sync_r: _sync_redis.Redis, session_id: str) -> bool:
@@ -185,6 +193,9 @@ def run_job_sync(
     max_steps = int(sess_data.get("max_steps", 20))
     scenario_config = json.loads(sess_data.get("scenario_config", "{}"))
     context = scenario_config.get("context")
+    # task_id để gom CDN artifacts cùng task vào 1 folder. Empty string khi
+    # session legacy không có task_id → fallback path cũ.
+    task_id = sess_data.get("task_id", "")
 
     # ── Callback mode setup ──────────────────────────────────────────────
     callback_url = scenario_config.get("callback_url")
@@ -217,6 +228,10 @@ def run_job_sync(
     # finally chưa fire → session.json chưa exist khi scan upload.
     _gen_holder: dict = {"gen": None}
 
+    # Output holder — action `extract_data` ghi data extracted vào ["data"].
+    # Khai báo trước _persist_artifacts để closure đọc được (Python late binding).
+    output_holder: dict = {}
+
     def _close_gen() -> None:
         g = _gen_holder.get("gen")
         if g is None:
@@ -241,7 +256,14 @@ def run_job_sync(
         try:
             artifact_dir = get_session_artifact_dir(session_id)
             write_session_jsonl(session_id, _collected_events, artifact_dir)
-            _copy_runner_session_json(session_id, artifact_dir, uploader, session_start)
+            # Copy + upload session.json (rich diagnostic) — capture CDN URL
+            # để embed vào result.json (Fix A: Sup Agent fetch debug được).
+            session_json_url = _copy_runner_session_json(
+                session_id, artifact_dir, uploader, session_start, task_id=task_id,
+            )
+            # extracted_data = data từ action `extract_data` (nếu spec có
+            # `output_schema` + step extract_data). Persist lưu vào result.json.
+            extracted_data = output_holder.get("data") if output_holder else None
             result_path = write_result_json(
                 session_id=session_id,
                 status=status,
@@ -254,6 +276,9 @@ def run_job_sync(
                 artifact_dir=artifact_dir,
                 error_msg=error_msg,
                 uploader=uploader,
+                extracted_data=extracted_data,
+                session_json_url=session_json_url,
+                task_id=task_id,
             )
             update_sync(sync_r, session_id, result_path=str(result_path))
         except Exception as e:
@@ -282,6 +307,9 @@ def run_job_sync(
                     f"Seed builtin hoặc tạo qua POST /v1/scenarios trước."
                 )
 
+        # output_holder đã khai báo ngoài try block (để _persist_artifacts
+        # closure đọc được). run_scenario sẽ ghi vào output_holder["data"] khi
+        # action extract_data chạy.
         gen = run_scenario(
             spec=spec,
             api_key=api_key,
@@ -290,6 +318,7 @@ def run_job_sync(
             session_id=session_id,
             goal_override=scenario_config.get("goal") or None,
             url_override=scenario_config.get("url") or None,
+            output_holder=output_holder,
         )
         _gen_holder["gen"] = gen
 
@@ -330,11 +359,12 @@ def run_job_sync(
                 if uploader and uploader.should_upload(record):
                     if record.screenshot_path:
                         screenshot_cdn = uploader.upload_screenshot(
-                            record.screenshot_path, session_id, record.step
+                            record.screenshot_path, session_id, record.step, task_id=task_id,
                         ) or ""
                     if annotated_path and Path(annotated_path).exists():
                         annotated_cdn = uploader.upload_screenshot(
-                            annotated_path, session_id, record.step, suffix="-annotated"
+                            annotated_path, session_id, record.step,
+                            suffix="-annotated", task_id=task_id,
                         ) or ""
 
                 # Ưu tiên ảnh annotated (có khoanh đỏ element được click) khi
@@ -364,7 +394,7 @@ def run_job_sync(
                     # Upload session log NGAY trước khi block — admin/Sup Agent
                     # có thể fetch log mid-session để debug khi worker đang chờ user.
                     try:
-                        log_svc.upload_session_log(session_id)
+                        log_svc.upload_session_log(session_id, task_id=task_id)
                     except Exception as _e:
                         _log.warning(f"[{session_id}] mid-session log upload failed: {_e}")
 
@@ -486,7 +516,7 @@ def run_job_sync(
     finally:
         # Upload session log to DSC
         try:
-            log_svc.upload_session_log(session_id)
+            log_svc.upload_session_log(session_id, task_id=task_id)
         except Exception as e:
             _log.warning(f"[{session_id}] Session log upload failed: {e}")
         # Đóng browser sau mỗi session để clear cookies/SSO state — tránh leak

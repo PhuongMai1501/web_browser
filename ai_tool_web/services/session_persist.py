@@ -49,6 +49,9 @@ def write_result_json(
     artifact_dir: Path,
     error_msg: str = "",
     uploader=None,
+    extracted_data: dict | None = None,
+    session_json_url: str = "",
+    task_id: str = "",
 ) -> Path:
     """
     Ghi result.json tổng kết session.
@@ -57,9 +60,16 @@ def write_result_json(
       session_id, status, scenario, summary, url_after,
       total_steps, duration_seconds, finished_at,
       error_msg (nếu failed),
-      artifacts.log_path, artifacts.log_url (nếu upload thành công)
+      artifacts.log_path, artifacts.log_url (events log session.jsonl CDN),
+      artifacts.session_json_url (rich diagnostic session.json CDN —
+        chứa llm_prompt, llm_raw_response, action chosen từng step),
+      data (nếu spec có output_schema + action extract_data đã chạy)
 
     uploader: ArtifactUploader instance hoặc None.
+    extracted_data: dict từ action `extract_data` (nếu có) — merge vào
+                    result["data"] để Sup Agent đọc theo output_schema.
+    session_json_url: CDN URL của session.json đã upload bởi job_handler
+                     `_copy_runner_session_json`. Rỗng nếu fail/skip.
     """
     artifact_dir.mkdir(parents=True, exist_ok=True)
     jsonl_path = artifact_dir / "session.jsonl"
@@ -69,7 +79,7 @@ def write_result_json(
     log_url = ""
     if uploader and jsonl_path.exists():
         from services.artifact_uploader import build_artifact_remote_path
-        remote = build_artifact_remote_path(session_id, "session.jsonl")
+        remote = build_artifact_remote_path(session_id, "session.jsonl", task_id=task_id)
         log_url = uploader.upload_artifact(str(jsonl_path), remote) or ""
 
     result = {
@@ -84,10 +94,16 @@ def write_result_json(
         "artifacts": {
             "log_path": str(jsonl_path),
             "log_url": log_url,
+            # CDN URL của session.json (rich diagnostic) — Sup Agent fetch
+            # llm_prompt, llm_raw_response, action chosen từng step.
+            # Rỗng nếu session.json không tìm thấy hoặc uploader=None.
+            "session_json_url": session_json_url,
         },
     }
     if error_msg:
         result["error_msg"] = error_msg
+    if extracted_data:
+        result["data"] = extracted_data
 
     try:
         with open(result_path, "w", encoding="utf-8") as f:
@@ -100,7 +116,7 @@ def write_result_json(
     # Upload result.json lên CDN
     if uploader:
         from services.artifact_uploader import build_artifact_remote_path
-        remote = build_artifact_remote_path(session_id, "result.json")
+        remote = build_artifact_remote_path(session_id, "result.json", task_id=task_id)
         uploader.upload_artifact(str(result_path), remote)
 
     return result_path

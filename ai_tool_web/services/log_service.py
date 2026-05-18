@@ -163,15 +163,18 @@ class LogService:
         with self._lock:
             self._flush_upload_locked()
 
-    def upload_session_log(self, session_id: str) -> str | None:
-        """Upload session log file lên DSC. Trả về CDN URL hoặc None."""
+    def upload_session_log(self, session_id: str, task_id: str = "") -> str | None:
+        """Upload session log file lên DSC. Trả về CDN URL hoặc None.
+
+        task_id: nếu có, gom file vào folder task_id/ — dễ trace iter cùng task.
+        """
         if not self._uploader:
             return None
         path = self._session_dir / f"{session_id}.jsonl"
         if not path.exists():
             return None
         from services.artifact_uploader import build_artifact_remote_path
-        remote = build_artifact_remote_path(session_id, "log_session.jsonl")
+        remote = build_artifact_remote_path(session_id, "log_session.jsonl", task_id=task_id)
         return self._uploader.upload_artifact(str(path), remote)
 
     # ── Internal ──────────────────────────────────────────────────────────
