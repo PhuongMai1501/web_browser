@@ -264,7 +264,7 @@ def run_job_sync(
             # extracted_data = data từ action `extract_data` (nếu spec có
             # `output_schema` + step extract_data). Persist lưu vào result.json.
             extracted_data = output_holder.get("data") if output_holder else None
-            result_path = write_result_json(
+            result_path, result_cdn_url = write_result_json(
                 session_id=session_id,
                 status=status,
                 scenario=scenario,
@@ -280,7 +280,11 @@ def run_job_sync(
                 session_json_url=session_json_url,
                 task_id=task_id,
             )
-            update_sync(sync_r, session_id, result_path=str(result_path))
+            # Lưu CDN URL vào Redis để API pod fetch (K8s: API ≠ Worker FS).
+            # Fallback empty string nếu uploader=None hoặc upload fail.
+            update_sync(sync_r, session_id,
+                        result_path=str(result_path),
+                        result_cdn_url=result_cdn_url)
         except Exception as e:
             _log.error(f"[{session_id}] Failed to persist artifacts: {e}")
 

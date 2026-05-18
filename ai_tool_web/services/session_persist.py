@@ -52,7 +52,7 @@ def write_result_json(
     extracted_data: dict | None = None,
     session_json_url: str = "",
     task_id: str = "",
-) -> Path:
+) -> tuple[Path, str]:
     """
     Ghi result.json tổng kết session.
 
@@ -111,12 +111,15 @@ def write_result_json(
         _log.info(f"[{session_id}] result.json written → {result_path}")
     except Exception as e:
         _log.error(f"[{session_id}] Failed to write result.json: {e}")
-        return result_path
+        return result_path, ""
 
-    # Upload result.json lên CDN
+    # Upload result.json lên CDN — capture URL để caller lưu Redis.
+    # K8s: API và Worker là 2 pod khác nhau, không share local FS → API phải
+    # fetch result.json từ CDN (BUG-result-endpoint-404-k8s).
+    result_cdn_url = ""
     if uploader:
         from services.artifact_uploader import build_artifact_remote_path
         remote = build_artifact_remote_path(session_id, "result.json", task_id=task_id)
-        uploader.upload_artifact(str(result_path), remote)
+        result_cdn_url = uploader.upload_artifact(str(result_path), remote) or ""
 
-    return result_path
+    return result_path, result_cdn_url
