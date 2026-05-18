@@ -12,7 +12,13 @@ def run_click(rt, step) -> ActionResult:
         return ActionResult(ok=False, action_type="click",
                             error="step click thiếu 'target'")
     snapshot = _ensure_snapshot(rt)
-    ref = find_ref(snapshot, step.target)
+    # Vision fallback nếu có image_hint + text matcher fail (rt method có
+    # cap counter + take screenshot nội bộ). FlowRuntime không có method
+    # → fallback sang find_ref text-only (test fakes).
+    if hasattr(rt, "find_ref_with_vision"):
+        ref = rt.find_ref_with_vision(step.target, snapshot)
+    else:
+        ref = find_ref(snapshot, step.target)
     if ref is None:
         return ActionResult(
             ok=False, action_type="click",

@@ -14,6 +14,11 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from services.inputs_validator import InputValidationError
+from services.scenario_image_service import (
+    ScenarioImageBadRequest,
+    ScenarioImageNotFound,
+    ScenarioImageUploadFailed,
+)
 from services.user_scenario_service import (
     QuotaExceeded,
     ScenarioBadRequest,
@@ -61,3 +66,18 @@ def register_scenario_exception_handlers(app: FastAPI) -> None:
             status_code=400,
             content={"detail": "Input validation failed", "errors": exc.errors},
         )
+
+    # ── Scenario image hint exceptions ───────────────────────────────────────
+
+    @app.exception_handler(ScenarioImageNotFound)
+    async def _img_not_found(_: Request, exc: ScenarioImageNotFound):
+        return JSONResponse(status_code=404, content={"detail": str(exc)})
+
+    @app.exception_handler(ScenarioImageBadRequest)
+    async def _img_bad_request(_: Request, exc: ScenarioImageBadRequest):
+        return JSONResponse(status_code=400, content={"detail": str(exc)})
+
+    @app.exception_handler(ScenarioImageUploadFailed)
+    async def _img_upload_failed(_: Request, exc: ScenarioImageUploadFailed):
+        # 502 Bad Gateway — upstream MinIO/upload server fail
+        return JSONResponse(status_code=502, content={"detail": str(exc)})

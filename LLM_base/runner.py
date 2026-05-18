@@ -31,6 +31,47 @@ _EXACT_PLACEHOLDERS = frozenset({
 })
 
 
+# Cancel intent — keyword/phrase user dùng để yêu cầu dừng session khi
+# trả lời cho action ask. Pre-process ở runner layer, KHÔNG phụ thuộc LLM
+# (deterministic safety net). System prompt cũng dạy LLM hiểu thêm các
+# phrasing tự nhiên — 2 lớp bảo vệ.
+_CANCEL_PHRASES = frozenset({
+    # Vietnamese
+    "dừng", "dừng lại", "dừng đi", "dừng session",
+    "huỷ", "hủy", "huỷ bỏ", "hủy bỏ",
+    "thôi", "thôi đi", "thôi nhé",
+    "không", "không làm nữa", "không cần nữa", "không tiếp tục",
+    "kết thúc", "kết thúc session", "đóng", "đóng session",
+    "thoát", "thoát ra", "tôi muốn dừng", "tôi đổi ý",
+    "k làm nữa", "k cần", "k tiếp",
+    # English
+    "stop", "stop it", "stop session", "stop now",
+    "cancel", "cancel session", "abort", "exit", "quit",
+    "end", "end session", "i want to stop", "give up",
+    "no more", "nope",
+})
+
+
+def _is_cancel_intent(answer: str) -> bool:
+    """Phát hiện user yêu cầu dừng session qua câu trả lời cho action ask.
+
+    Match chính xác sau khi normalize (strip + lowercase + bỏ punctuation).
+    KHÔNG dùng substring để tránh false positive (vd answer chứa từ "stop"
+    trong câu khác ngữ cảnh). Chỉ match khi answer ngắn (< 80 chars) và là
+    1 cancel phrase độc lập.
+    """
+    if not answer:
+        return False
+    if len(answer) > 80:
+        # Câu dài thường là provide data, không phải cancel command
+        return False
+    norm = answer.strip().lower().rstrip(".,!?;:")
+    norm = norm.strip()
+    if not norm:
+        return False
+    return norm in _CANCEL_PHRASES
+
+
 def _mask_prompt_secrets(prompt: str, context: dict | None) -> str:
     """Thay thế giá trị secret trong prompt text trước khi lưu log."""
     if not context:
@@ -651,6 +692,46 @@ def run_agent_autonomous(
             # Dừng tại đây và chờ caller gọi gen.send(answer) để tiếp tục
             answer = yield record
             history[-1]["answer"] = answer or ""
+
+            # Phát hiện user yêu cầu dừng session — emit terminal record
+            # với action "done" + reason="user_cancelled". Chống ask vô tận
+            # khi user nói dừng nhưng LLM không hiểu, vẫn plan tiếp.
+            if _is_cancel_intent(answer):
+                _logger.info(
+                    "User cancel intent detected: %r — terminating session",
+                    answer[:100],
+                )
+                cancel_action = {
+                    "action": "done",
+                    "reason": "user_cancelled",
+                    "message": (
+                        f"Session dừng theo yêu cầu user: \"{(answer or '').strip()}\""
+                    ),
+                }
+                cancel_record = StepRecord(
+                    step=step_num + 1,
+                    goal=goal,
+                    snapshot="",
+                    screenshot_path="",
+                    screenshot_b64="",
+                    annotated_screenshot_b64="",
+                    action=cancel_action,
+                    llm_prompt="",
+                    llm_raw_response="",
+                    url_before="",
+                    url_after="",
+                    page_title="",
+                    annotated_screenshot_path="",
+                    error="",
+                )
+                session.add_step(cancel_record)
+                try:
+                    session.save_log(run_dir)
+                except Exception:
+                    pass
+                yield cancel_record
+                break
+
             continue  # vào vòng lặp tiếp theo với answer đã được ghi vào history
 
         yield record

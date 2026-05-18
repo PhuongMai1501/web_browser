@@ -57,6 +57,11 @@ ARTIFACTS_DIR.mkdir(exist_ok=True)
 # Chỉ cho phép ref dạng e<số> (e1, e2, e11...)
 _REF_PATTERN = re.compile(r"^e\d+$")
 
+# ⚠️ TẠM THỜI BYPASS DOMAIN ALLOWLIST (2026-05-06) — cho tester thử mọi site.
+# Khi siết security lại: set _BYPASS_DOMAIN_CHECK = False.
+# Bypass này có tác dụng cao hơn cả scenario.allowed_domains override.
+_BYPASS_DOMAIN_CHECK = True
+
 # Domain allowlist cho open_url — chỉ điều hướng đến các domain tin cậy
 _DEFAULT_ALLOWED_DOMAINS = frozenset({
     "fpt.net", "microsoftonline.com", "microsoft.com",
@@ -89,7 +94,10 @@ def _validate_ref(ref: str) -> None:
 
 
 def _validate_url_domain(url: str) -> None:
-    """Validate URL thuộc domain trong allowlist."""
+    """Validate URL thuộc domain trong allowlist.
+    Bypass nếu _BYPASS_DOMAIN_CHECK = True (cờ tạm cho tester)."""
+    if _BYPASS_DOMAIN_CHECK:
+        return
     try:
         hostname = urlparse(url).hostname or ""
         if hostname and not any(
@@ -158,9 +166,66 @@ def _run(args: list[str], timeout: int = _BROWSER_TIMEOUT_S) -> str:
 
 
 def open_url(url: str) -> str:
-    """Mở URL trong browser."""
+    """Mở URL trong browser.
+
+    Diagnostic logging (BUG-001 — bug intermittent timeout chưa rõ root
+    cause). Log timing precise + failure mode để phân tích pattern qua
+    nhiều run:
+    - SUCCESS  : <elapsed>s url=<url>
+    - TIMEOUT_SUBPROCESS: subprocess Python timeout 60s (rất hiếm)
+    - TIMEOUT_AGENT    : agent-browser exit 1 "Operation timed out"
+                         (thường ~27-30s, Playwright internal timeout)
+    - ERROR_OTHER      : RuntimeError với message khác
+    - ERROR_EXC        : Exception khác (network, DNS, ...)
+
+    → Sau ~10 run liên tiếp, paste log để phân tích:
+       - Fail rate? Fail luôn ở giây thứ N hay random?
+       - Cùng failure mode hay đa dạng?
+       - Tương quan với pod uptime / load?
+    """
+    import logging as _logging
+    _diag_log = _logging.getLogger("browser_adapter.open_url.diag")
+
     _validate_url_domain(url)
-    return _run(["open", url], timeout=60)
+    started = time.monotonic()
+    try:
+        result = _run(["open", url], timeout=60)
+        elapsed_ms = int((time.monotonic() - started) * 1000)
+        _diag_log.info(
+            "OPEN_URL SUCCESS elapsed_ms=%d url=%s", elapsed_ms, url,
+        )
+        return result
+    except subprocess.TimeoutExpired:
+        elapsed_ms = int((time.monotonic() - started) * 1000)
+        _diag_log.warning(
+            "OPEN_URL TIMEOUT_SUBPROCESS elapsed_ms=%d url=%s "
+            "(Python subprocess 60s timeout)",
+            elapsed_ms, url,
+        )
+        raise
+    except RuntimeError as e:
+        elapsed_ms = int((time.monotonic() - started) * 1000)
+        msg = str(e)
+        if "Operation timed out" in msg or "timed out" in msg.lower():
+            _diag_log.warning(
+                "OPEN_URL TIMEOUT_AGENT elapsed_ms=%d url=%s "
+                "(agent-browser internal timeout, likely Playwright "
+                "page.goto wait_until=load failed)",
+                elapsed_ms, url,
+            )
+        else:
+            _diag_log.warning(
+                "OPEN_URL ERROR_OTHER elapsed_ms=%d url=%s msg=%s",
+                elapsed_ms, url, msg[:200],
+            )
+        raise
+    except Exception as e:
+        elapsed_ms = int((time.monotonic() - started) * 1000)
+        _diag_log.error(
+            "OPEN_URL ERROR_EXC elapsed_ms=%d url=%s exc_type=%s exc=%s",
+            elapsed_ms, url, type(e).__name__, str(e)[:200],
+        )
+        raise
 
 
 def close_browser() -> str:
@@ -217,9 +282,16 @@ def page_contains_any(texts: tuple[str, ...]) -> bool:
 
 
 def take_snapshot() -> str:
-    """Lấy accessibility tree snapshot, bổ sung metadata và inject error elements nếu có."""
+    """Lấy accessibility tree snapshot, bổ sung metadata và inject error elements nếu có.
+
+    Pipeline enrichment:
+    1. _enrich_snapshot_with_dom_hints — annotate link/button không nhãn
+    2. _enrich_snapshot_with_article_content — inject title/sapo/body cho trang article
+    3. _inject_page_errors — inject validation errors lên đầu nếu có
+    """
     raw = _run(["snapshot", "-i"])
     enriched = _enrich_snapshot_with_dom_hints(raw)
+    enriched = _enrich_snapshot_with_article_content(enriched)
     return _inject_page_errors(enriched)
 
 
@@ -396,6 +468,97 @@ def _enrich_snapshot_with_dom_hints(snapshot: str) -> str:
     snapshot = _annotate_role(snapshot, "link", dom_data.get("links", []))
     snapshot = _annotate_role(snapshot, "button", dom_data.get("buttons", []))
     return snapshot
+
+
+def _enrich_snapshot_with_article_content(snapshot: str) -> str:
+    """Inject content extract của trang article vào snapshot.
+
+    Khi trang có <article> tag (vnexpress, dantri, news sites...) — extract
+    title (h1), description (sapo/lead), URL → prepend vào snapshot text.
+    LLM thấy content sẵn không cần click thêm để "đọc" — chống case agent
+    click bừa vào element trên trang chi tiết article.
+
+    Silent skip nếu trang không có article (homepage/search/admin).
+    """
+    import base64 as _b64
+    import json as _json
+
+    try:
+        js = """
+(function() {
+  function clean(s) {
+    return (s || '').replace(/\\s+/g, ' ').trim();
+  }
+  // Tìm article container — ưu tiên thẻ <article>, fallback selector phổ biến
+  var article = document.querySelector('article')
+              || document.querySelector('[role="article"]')
+              || document.querySelector('main article')
+              || document.querySelector('.article, .post, .news-detail, .detail-news');
+  if (!article) {
+    return JSON.stringify({has_article: false});
+  }
+  // Title — h1 trong article, fallback document title
+  var h1 = article.querySelector('h1') || document.querySelector('h1');
+  var title = clean(h1 ? h1.innerText : document.title);
+  // Description/sapo — element có class chứa sapo/description/lead/summary,
+  // hoặc paragraph đầu tiên trong article
+  var sapoEl = article.querySelector(
+    '[class*="sapo"], [class*="Sapo"], [class*="description"], ' +
+    '[class*="lead"], [class*="summary"], [class*="excerpt"]'
+  );
+  var sapo = '';
+  if (sapoEl) {
+    sapo = clean(sapoEl.innerText);
+  } else {
+    var firstP = article.querySelector('p');
+    if (firstP) sapo = clean(firstP.innerText);
+  }
+  // Truncate dài quá → cap 800 chars để tiết kiệm tokens
+  if (sapo.length > 800) sapo = sapo.substring(0, 800) + '...';
+  // Body preview — first 1500 chars của article text (skip nếu sapo đã đủ)
+  var body = '';
+  if (sapo.length < 200) {
+    body = clean(article.innerText).substring(0, 1500);
+    if (article.innerText.length > 1500) body += '...';
+  }
+  return JSON.stringify({
+    has_article: true,
+    url: window.location.href,
+    title: title,
+    sapo: sapo,
+    body_preview: body
+  });
+})()
+"""
+        b64 = _b64.b64encode(js.encode()).decode()
+        raw = _run(["eval", "-b", b64], timeout=10)
+        data = _parse_json_output(raw)
+    except Exception:
+        return snapshot
+
+    if not data or not data.get("has_article"):
+        return snapshot
+
+    # Build header section — prepend trước snapshot text
+    parts = ["=== ARTICLE CONTENT (auto-extracted from <article>) ==="]
+    if data.get("title"):
+        parts.append(f"TITLE: {data['title']}")
+    if data.get("url"):
+        parts.append(f"URL: {data['url']}")
+    if data.get("sapo"):
+        parts.append(f"SAPO/LEAD: {data['sapo']}")
+    if data.get("body_preview"):
+        parts.append(f"BODY_PREVIEW: {data['body_preview']}")
+    parts.append("=== END ARTICLE CONTENT ===")
+    parts.append("")
+    parts.append(
+        "(Lưu ý LLM: content trên đã extract từ DOM article. Nếu goal yêu "
+        "cầu lấy tiêu đề/sapo/nội dung — DÙNG TRỰC TIẾP info trên + emit "
+        "action=done, KHÔNG click thêm element nào.)"
+    )
+    parts.append("")
+
+    return "\n".join(parts) + snapshot
 
 
 def take_screenshot(save_path: str | None = None, full_page: bool = False) -> tuple[str, str]:

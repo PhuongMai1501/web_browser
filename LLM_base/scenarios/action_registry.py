@@ -59,3 +59,5 @@ class ActionResult:
     action_type: str = ""           # tên action (để log/event)
     reason: str = ""                # mô tả ngắn gọn cho UI
     nested: Optional[list] = None   # kết quả các action con (cho if_visible)
+    downloaded_filename: str = ""   # filename file đã upload (action upload_download)
+    downloaded_cdn_url: str = ""    # CDN URL sau upload (action upload_download)

@@ -47,6 +47,20 @@ def run_wait_for(rt, step) -> ActionResult:
             time.sleep(POLL_MS / 1000.0)
 
     rt.last_snapshot = last_snapshot
+
+    # Sau khi text matcher timeout, thử vision fallback 1 lần (nếu image_hint có).
+    # KHÔNG poll vision trong loop — quá đắt (1-3s/call). Chỉ thử cuối cùng.
+    if hasattr(rt, "find_ref_with_vision") and getattr(step.target, "image_hint", None):
+        ref = rt.find_ref_with_vision(step.target, last_snapshot)
+        if ref:
+            return ActionResult(
+                ok=True, action_type="wait_for", ref_used=ref,
+                reason=(
+                    step.note
+                    or f"Đợi thấy {describe_target(step.target)} (vision)"
+                ),
+            )
+
     return ActionResult(
         ok=False, action_type="wait_for",
         error=(

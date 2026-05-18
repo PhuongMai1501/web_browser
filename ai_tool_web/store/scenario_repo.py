@@ -174,7 +174,42 @@ class ScenarioRepository(ABC):
         run_id: int,
         at: datetime,
     ) -> None:
-        """Update last_test_run_* fields. Đây là fields mutable DUY NHẤT trên revision."""
+        """Update last_test_run_* fields.
+
+        Lịch sử: trước đây đây là fields mutable DUY NHẤT trên revision (design
+        append-only). Từ Phase 1 Input Fields Management (2026-05-11), thêm
+        `update_revision_yaml` cho hybrid model: DRAFT revision (chưa được
+        scenario_definitions.published_revision_id trỏ tới) cũng mutable cho
+        raw_yaml/normalized_spec_json/yaml_hash. PUBLISHED revision vẫn frozen.
+        """
+
+    async def update_revision_yaml(
+        self,
+        rev_id: int,
+        raw_yaml: str,
+        normalized_spec_json: dict,
+        yaml_hash: str,
+    ) -> None:
+        """Update raw_yaml + normalized_spec_json + yaml_hash của 1 revision.
+
+        Chỉ gọi trên DRAFT revision (rev_id != scenario_definitions.published_revision_id).
+        Caller layer (service) responsibility check DRAFT trước khi gọi — repo
+        KHÔNG enforce ở DB layer (giữ flexibility cho admin tool nếu cần).
+
+        Use case: User edit input fields qua UI form → yaml_sync regenerate
+        raw_yaml từ DB fields → ghi lại revision in-place.
+
+        Updates kèm: date_updated = now.
+        KHÔNG update: parent_revision_id, clone_source_revision_id, schema_version,
+        static_validation_*, last_test_run_*, created_by, created_at.
+
+        Default implementation raise NotImplementedError. Phase 1 chỉ MySQL
+        backend override (Input Fields feature chỉ chạy với MySQL ở production).
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} chưa support update_revision_yaml "
+            f"(Phase 1 Input Fields chỉ chạy với MySQL backend)"
+        )
 
     # ── Runs ─────────────────────────────────────────────────────────────────
 

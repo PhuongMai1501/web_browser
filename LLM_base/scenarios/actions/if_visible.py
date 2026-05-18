@@ -23,7 +23,11 @@ def run_if_visible(rt, step) -> ActionResult:
     except Exception:
         snapshot = ""
     rt.last_snapshot = snapshot
-    ref = find_ref(snapshot, step.target)
+    # Vision fallback nếu image_hint có; rt method tự cap counter.
+    if hasattr(rt, "find_ref_with_vision"):
+        ref = rt.find_ref_with_vision(step.target, snapshot)
+    else:
+        ref = find_ref(snapshot, step.target)
     branch = step.then if ref else step.else_
     rt._pending_nested = branch
     return ActionResult(

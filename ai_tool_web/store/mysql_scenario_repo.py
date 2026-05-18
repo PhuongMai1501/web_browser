@@ -549,6 +549,41 @@ class MysqlScenarioRepo(ScenarioRepository):
                     (status, run_id, at, rev_id),
                 )
 
+    async def update_revision_yaml(
+        self,
+        rev_id: int,
+        raw_yaml: str,
+        normalized_spec_json: dict,
+        yaml_hash: str,
+    ) -> None:
+        """Update raw_yaml + normalized_spec_json + yaml_hash của 1 revision.
+
+        Phase 1 Input Fields hybrid: chỉ gọi trên DRAFT revision.
+        Service layer (yaml_sync hoặc input_field route) phải check DRAFT trước.
+        """
+        pool = self._get_pool()
+        async with pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    """
+                    UPDATE scenario_revisions
+                    SET raw_yaml = %s,
+                        normalized_spec_json = %s,
+                        yaml_hash = %s,
+                        date_updated = %s
+                    WHERE id = %s
+                    """,
+                    (
+                        raw_yaml,
+                        json.dumps(normalized_spec_json, ensure_ascii=False),
+                        yaml_hash,
+                        _now_utc(),
+                        rev_id,
+                    ),
+                )
+                if cur.rowcount == 0:
+                    raise ValueError(f"Revision {rev_id} không tồn tại")
+
     # ── Runs ─────────────────────────────────────────────────────────────────
 
     async def create_run(self, run: ScenarioRun) -> int:

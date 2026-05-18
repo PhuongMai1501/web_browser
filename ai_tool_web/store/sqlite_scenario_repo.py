@@ -430,6 +430,10 @@ class SqliteScenarioRepo(ScenarioRepository):
         )
         await db.commit()
 
+    # Phase 1 Input Fields: update_revision_yaml KHÔNG implement cho SQLite.
+    # Phase 1 chỉ chạy với MySQL backend ở production. SQLite kế thừa default
+    # NotImplementedError từ ScenarioRepository base class.
+
     # ── Runs ─────────────────────────────────────────────────────────────────
 
     async def create_run(self, run: ScenarioRun) -> int:

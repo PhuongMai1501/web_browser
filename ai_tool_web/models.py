@@ -17,6 +17,8 @@ from datetime import datetime
 class RunRequest(BaseModel):
     # Scenario id — validate runtime qua ScenarioStore (không dùng Literal để
     # có thể thêm scenario mới qua admin API /v1/scenarios).
+    # Nếu `scenario_yaml` được set, tool-web bỏ qua DB lookup và dùng YAML
+    # inline trực tiếp; `scenario` khi đó chỉ là tên hiển thị cho log.
     scenario: str = "chang_login"
     goal: Optional[str] = None           # override goal của spec (như custom cũ)
     url: Optional[str] = None            # override start_url của spec
@@ -24,6 +26,10 @@ class RunRequest(BaseModel):
     max_steps: int = Field(default=20, ge=3, le=30)
     callback_url: Optional[str] = None   # set → callback mode (không cần SSE)
     callback_secret: Optional[str] = None  # HMAC signature (optional)
+    # Custom YAML inline — Sup Agent paste YAML scenario trực tiếp, KHÔNG cần
+    # tạo scenario trong DB trước. Tool-web parse + validate qua yaml_normalizer,
+    # tạo spec ad-hoc (không lưu DB), bỏ qua DB lookup scenario.
+    scenario_yaml: Optional[str] = None
 
 
 class ResumeRequest(BaseModel):
@@ -50,6 +56,10 @@ class StepEvent(BaseModel):
     error: str = ""
     visual_fallback_used: bool = False
     timestamp: str = ""
+    # upload_download — file vừa upload lên CDN/MinIO. Sup Agent route file
+    # cho user qua `downloaded_cdn_url`. Rỗng cho mọi action khác.
+    downloaded_filename: str = ""
+    downloaded_cdn_url: str = ""
 
 
 class AskEvent(BaseModel):
@@ -152,7 +162,9 @@ def record_to_step_event(
     has_local = bool(record.screenshot_path)
 
     screenshot_url = screenshot_url_override or (f"{base}/screenshot" if has_local else "")
-    annotated_url = annotated_url_override or (f"{base}/screenshot?annotated=true" if has_local else "")
+    # Chỉ quảng cáo annotated_url khi worker đã thật sự lưu (override truthy).
+    # Fallback `?annotated=true` cũ gây 404 silent ở UI khi annotated chưa upload.
+    annotated_url = annotated_url_override
 
     return StepEvent(
         step=n,
@@ -168,6 +180,8 @@ def record_to_step_event(
         error=record.error or "",
         visual_fallback_used=record.visual_fallback_used,
         timestamp=record.timestamp or "",
+        downloaded_filename=action.get("downloaded_filename") or "",
+        downloaded_cdn_url=action.get("downloaded_cdn_url") or "",
     )
 
 

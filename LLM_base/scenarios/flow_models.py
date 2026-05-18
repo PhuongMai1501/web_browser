@@ -39,6 +39,12 @@ class TargetSpec(BaseModel):
     Semantics:
     - `*_any`: OR — element phải chứa **BẤT KỲ** string nào trong list.
     - `*_all`: AND — element phải chứa **TẤT CẢ** string trong list.
+
+    Visual hint (optional):
+    - `image_hint`: CDN URL ảnh user khoanh đỏ element cần click.
+      Vision matcher fallback khi text matcher fail. Source of truth runtime.
+    - `image_hint_desc`: Mô tả phụ trợ cho vision LLM (vd: "tab download
+      chính, KHÔNG phải link Tải về của related document").
     """
 
     text_any: Optional[list[str]] = None       # OR — match text/label
@@ -49,13 +55,21 @@ class TargetSpec(BaseModel):
     css: Optional[str] = None                  # escape hatch
     nth: int = 0                               # nếu nhiều match, lấy phần tử thứ n
 
+    # Visual hint (Phase 1 Visual Hints — optional)
+    image_hint: Optional[str] = None           # CDN URL ảnh khoanh đỏ
+    image_hint_desc: Optional[str] = None      # mô tả phụ trợ cho vision LLM
+
     @model_validator(mode="after")
     def _ensure_any_field(self) -> "TargetSpec":
+        # image_hint một mình KHÔNG đủ — vẫn cần text/role để text matcher thử
+        # trước khi escalate vision. Tránh trường hợp scenario chỉ có ảnh →
+        # mọi step đều gọi vision, đốt cost vô tội vạ.
         if not any([self.text_any, self.text_all, self.label_any,
                     self.placeholder_any, self.role, self.css]):
             raise ValueError(
                 "TargetSpec phải có ít nhất 1 trong: "
-                "text_any, text_all, label_any, placeholder_any, role, css"
+                "text_any, text_all, label_any, placeholder_any, role, css. "
+                "image_hint là optional fallback, không thay thế các field này."
             )
         return self
 
@@ -95,6 +109,8 @@ class FlowStep(BaseModel):
     click            | target
     ask_user         | field + prompt
     if_visible       | target + then (+ else)
+    eval_js          | script
+    upload_download  | (optional: extensions, remote_dir, timeout_ms)
     """
 
     action: str
@@ -117,6 +133,13 @@ class FlowStep(BaseModel):
     # scroll
     direction: Optional[str] = None      # up|down|left|right|top|bottom
     amount: Optional[int] = None         # pixels (None = agent-browser default 300)
+
+    # eval_js — JS code chạy trực tiếp trong page context
+    script: Optional[str] = None
+
+    # upload_download — filter file extension + override remote_dir trên CDN
+    extensions: Optional[list[str]] = None  # [".doc", ".pdf"] — filter file mới
+    remote_dir: Optional[str] = None        # subdir trên CDN bucket
 
     # condition branching (if_visible)
     then: list["FlowStep"] = Field(default_factory=list)

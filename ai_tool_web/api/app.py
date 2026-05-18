@@ -29,8 +29,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from api.exception_handlers import register_scenario_exception_handlers
 from api.recovery import recovery_loop
 from api.routes import (
-    auth, browser, cancel, health, result, resume, scenarios, screenshots, sessions, stream,
-    user_hooks, user_scenarios,
+    auth, browser, cancel, health, input_fields, result, resume,
+    scenario_generate, scenario_images, scenarios, screenshots, sessions,
+    stream, user_hooks, user_scenarios,
 )
 from auth.mock_provider import MockAuthProvider
 from config import LOG_DIR
@@ -74,6 +75,9 @@ for _router_module in (
     health, sessions, stream, resume, cancel, browser, screenshots, result,
     auth,                               # /v1/auth/me — admin status check
     user_scenarios, user_hooks,         # Phase 1 user CRUD (X-User-Id + SQLite)
+    scenario_images,                    # Visual Hint Targeting Phase 1
+    input_fields,                       # Phase 1 Input Fields Management
+    scenario_generate,                  # POST /v1/scenarios/generate (LLM-assisted)
 ):
     app.include_router(_router_module.router)
 
@@ -183,6 +187,49 @@ async def _startup():
         except Exception as e:
             _log.error("SQLite builtin seed fail: %s", e)
 
+    # ── Visual Hint Targeting Phase 1: scenario_images repo (MySQL only) ─────
+    # Service ScenarioImageService hiện chỉ support MySQL backend (lookup
+    # scenario PK BIGINT). SQLite backend → skip wiring, route trả 503.
+    if backend == "mysql":
+        from store.mysql_scenario_image_repo import MysqlScenarioImageRepo
+        image_repo = MysqlScenarioImageRepo(
+            host=os.environ["MYSQL_HOST"],
+            port=int(os.getenv("MYSQL_PORT", "3306")),
+            user=os.environ["MYSQL_USER"],
+            password=os.environ["MYSQL_PASSWORD"],
+            db=os.environ["MYSQL_DB"],
+            pool_size=int(os.getenv("MYSQL_IMAGE_POOL_SIZE", "3")),
+        )
+        await image_repo.init()
+        app.state.scenario_image_repo = image_repo
+        _log.info("Scenario image repo initialized (mysql)")
+    else:
+        _log.info(
+            "Scenario image repo skipped (backend=%s, only mysql supported)",
+            backend,
+        )
+
+    # ── Input Fields Management Phase 1: scenario_input_fields repo (MySQL only) ─
+    # Service tương tự ScenarioImageService — chỉ MySQL backend. SQLite skip.
+    if backend == "mysql":
+        from store.mysql_scenario_input_field_repo import MysqlScenarioInputFieldRepo
+        input_field_repo = MysqlScenarioInputFieldRepo(
+            host=os.environ["MYSQL_HOST"],
+            port=int(os.getenv("MYSQL_PORT", "3306")),
+            user=os.environ["MYSQL_USER"],
+            password=os.environ["MYSQL_PASSWORD"],
+            db=os.environ["MYSQL_DB"],
+            pool_size=int(os.getenv("MYSQL_INPUT_FIELD_POOL_SIZE", "3")),
+        )
+        await input_field_repo.init()
+        app.state.input_field_repo = input_field_repo
+        _log.info("Scenario input field repo initialized (mysql)")
+    else:
+        _log.info(
+            "Input field repo skipped (backend=%s, only mysql supported)",
+            backend,
+        )
+
     _log.info("API started. Recovery loop running.")
 
 
@@ -195,6 +242,22 @@ async def _shutdown():
             _log.info("Scenario repo closed")
         except Exception as e:
             _log.error("Error closing scenario repo: %s", e)
+
+    image_repo = getattr(app.state, "scenario_image_repo", None)
+    if image_repo is not None:
+        try:
+            await image_repo.close()
+            _log.info("Scenario image repo closed")
+        except Exception as e:
+            _log.error("Error closing scenario image repo: %s", e)
+
+    input_field_repo = getattr(app.state, "input_field_repo", None)
+    if input_field_repo is not None:
+        try:
+            await input_field_repo.close()
+            _log.info("Scenario input field repo closed")
+        except Exception as e:
+            _log.error("Error closing input field repo: %s", e)
 
 
 @app.get("/v1/debug/test-upload")
@@ -245,6 +308,92 @@ async def debug_test_upload():
         return {"status": "ok", "cdn_url": cdn_url}
     return {"status": "failed", "cdn_url": None,
             "hint": "Kiểm tra UPLOAD_URL / KEY / SECRET và log worker"}
+
+
+@app.get("/v1/debug/test-cdn-fetch")
+async def debug_test_cdn_fetch(url: str, mode: str = "direct"):
+    """Test isolated download CDN từ bên trong API pod.
+
+    Diagnose BUG-006 — vision_matcher fail download CDN. Test trong pod
+    với 2 mode để xác định pod có direct egress hay phải qua proxy:
+
+    - mode=direct: Session.trust_env=False → bypass proxy env vars,
+      đi direct qua egress K8s pod
+    - mode=proxy: default behavior — đi qua HTTP_PROXY env nếu có
+
+    Usage:
+      curl 'https://<API>/v1/debug/test-cdn-fetch?url=https://cdn.fstats.ai/...&mode=direct' \\
+        -H 'X-User-Id: hiepqn'
+
+    Response: success/fail + size + elapsed + error type/msg.
+
+    Diagnosis:
+    - direct OK + proxy OK → cả 2 path work (lạ, em đoán không xảy ra)
+    - direct OK + proxy FAIL → fix vision_matcher trust_env=False đúng
+    - direct FAIL + proxy OK → pod KHÔNG có direct egress, phải dùng proxy
+    - direct FAIL + proxy FAIL → network/firewall block hoàn toàn
+    """
+    import os
+    import time
+    import requests
+
+    started = time.monotonic()
+    proxy_env = {
+        "HTTP_PROXY": os.getenv("HTTP_PROXY", ""),
+        "HTTPS_PROXY": os.getenv("HTTPS_PROXY", ""),
+        "NO_PROXY": os.getenv("NO_PROXY", ""),
+    }
+
+    # Timeout ngắn (5s) để pod trả JSON error trước khi Ingress 504
+    try:
+        if mode == "direct":
+            session = requests.Session()
+            session.trust_env = False
+            resp = session.get(url, timeout=(5, 5))
+        else:
+            # Default: trust_env=True → đọc env HTTP_PROXY → qua proxy
+            resp = requests.get(url, timeout=(5, 5))
+
+        elapsed_ms = int((time.monotonic() - started) * 1000)
+        return {
+            "success": resp.status_code == 200,
+            "status_code": resp.status_code,
+            "size_bytes": len(resp.content),
+            "elapsed_ms": elapsed_ms,
+            "mode": mode,
+            "proxy_env": proxy_env,
+            "content_type": resp.headers.get("content-type", ""),
+        }
+    except requests.exceptions.ConnectTimeout as e:
+        return {
+            "success": False,
+            "error_type": "ConnectTimeout",
+            "error_msg": str(e)[:300],
+            "elapsed_ms": int((time.monotonic() - started) * 1000),
+            "mode": mode,
+            "proxy_env": proxy_env,
+            "diagnosis": (
+                "Pod không thể connect TCP — direct egress block hoặc proxy fail"
+            ),
+        }
+    except requests.exceptions.ProxyError as e:
+        return {
+            "success": False,
+            "error_type": "ProxyError",
+            "error_msg": str(e)[:300],
+            "elapsed_ms": int((time.monotonic() - started) * 1000),
+            "mode": mode,
+            "proxy_env": proxy_env,
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "error_type": type(e).__name__,
+            "error_msg": str(e)[:300],
+            "elapsed_ms": int((time.monotonic() - started) * 1000),
+            "mode": mode,
+            "proxy_env": proxy_env,
+        }
 
 
 @app.get("/v1/debug/runner-logs")

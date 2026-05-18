@@ -122,6 +122,49 @@ async def _log_upload_loop(log_svc) -> None:
             _log.warning(f"Log upload failed: {e}")
 
 
+# Tránh prefix "worker:" vì xung đột với worker_registry pattern `worker:{id}`
+# (sẽ làm get_all() parse "1" thành JSON → crash health endpoint).
+_EMERGENCY_EXIT_KEY = "control:worker_emergency_exit"
+_EMERGENCY_EXIT_POLL_S = 5
+
+
+async def _emergency_exit_watcher(worker_id: str, async_r) -> None:
+    """Background task: poll Redis flag để force-exit worker process.
+
+    Khi admin gọi POST /v1/browser/kill-all (hard), API SET key
+    `control:worker_emergency_exit=1` (TTL 60s). Task này poll mỗi 5s, khi thấy flag:
+    1. Atomic GETDEL để worker khác không pick lại flag cũ
+    2. Log incident
+    3. os._exit(99) — bypass GIL/atexit/cleanup, force kill PID ngay
+    4. K8s Deployment ReplicaSet auto-respawn pod (~20-30s)
+
+    Why os._exit thay vì sys.exit: sys.exit chỉ raise SystemExit ở thread
+    hiện tại. Nếu worker đang `asyncio.to_thread(job_handler.run_job_sync)`
+    chạy sync code blocking (LLM call timeout), SystemExit không reach được
+    thread đó. os._exit kill toàn bộ process ngay lập tức.
+
+    Why event loop free khi to_thread đang chạy: asyncio.to_thread chuyển
+    sync function vào default executor, event loop tiếp tục pump các task
+    khác (heartbeat, log_upload, this watcher).
+    """
+    while True:
+        try:
+            await asyncio.sleep(_EMERGENCY_EXIT_POLL_S)
+            flag = await async_r.getdel(_EMERGENCY_EXIT_KEY)
+            if flag == "1":
+                _log.warning(json.dumps({
+                    "type": "emergency_exit",
+                    "worker_id": worker_id,
+                    "trigger": "admin_kill_all_hard",
+                    "msg": "Force exiting via os._exit(99) — K8s will respawn pod",
+                }, ensure_ascii=False))
+                os._exit(99)
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            _log.warning(f"emergency_exit_watcher error: {e}")
+
+
 async def main(worker_id: str) -> None:
     # Isolate browser session per worker — each worker gets its own Chrome context
     os.environ["AGENT_BROWSER_SESSION"] = worker_id
@@ -147,6 +190,7 @@ async def main(worker_id: str) -> None:
     await worker_registry.register(async_r, worker_id, "idle", "", started_at=started_at_iso)
     hb_task = asyncio.create_task(heartbeat.run(worker_id, async_r))
     log_upload_task = asyncio.create_task(_log_upload_loop(log_svc))
+    exit_watcher_task = asyncio.create_task(_emergency_exit_watcher(worker_id, async_r))
     _log.info(f"[{worker_id}] Worker started, waiting for jobs")
 
     try:
@@ -198,6 +242,7 @@ async def main(worker_id: str) -> None:
     finally:
         hb_task.cancel()
         log_upload_task.cancel()
+        exit_watcher_task.cancel()
         await async_r.aclose()
 
 

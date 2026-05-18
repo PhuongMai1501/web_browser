@@ -35,9 +35,12 @@ def run_fill(rt, step) -> ActionResult:
             error="step fill cần 'value' hoặc 'value_from'",
         )
 
-    # Snapshot + tìm ref
+    # Snapshot + tìm ref (vision fallback nếu rt hỗ trợ + có image_hint)
     snapshot = _ensure_snapshot(rt)
-    ref = find_ref(snapshot, step.target)
+    if hasattr(rt, "find_ref_with_vision"):
+        ref = rt.find_ref_with_vision(step.target, snapshot)
+    else:
+        ref = find_ref(snapshot, step.target)
     if ref is None:
         return ActionResult(
             ok=False, action_type="fill",

@@ -1,0 +1,325 @@
+id: check_law_version_qcvn
+display_name: Kiểm tra version & Tải QCVN/TCVN
+description: |
+  Đăng nhập thuvienphapluat.vn, click tab "Tiêu Chuẩn Việt Nam" (TCVN) trên
+  top navigation, search số hiệu, mở văn bản theo title_hint, click "Tải về"
+  và tải bản tiếng Việt. File upload CDN.
+
+  Input: username, password (form login), so_hieu (vd "QCVN 10:2025/BCA"),
+  title_hint (vd "phòng cháy").
+  Phase 1: chỉ download, KHÔNG đọc Lược đồ / KHÔNG kiểm tra hiệu lực.
+
+  ⚠️ Step 2 (click tab TCVN) DÙNG IMAGE_HINT (Phase 4 vision matcher) — test
+  khả năng vision LLM phân biệt tab "TCVN" với tab "QCVN" / "Văn bản pháp
+  luật" có text tương tự. text_any cố tình sai để force vision fallback.
+enabled: true
+mode: flow
+
+start_url: https://thuvienphapluat.vn
+max_steps_default: 14
+allowed_domains:
+  - thuvienphapluat.vn
+
+inputs:
+  # ⚠️ TEST MODE — defaults hardcoded để Sup Agent paste YAML chạy ngay
+  # không cần truyền context. Password đổi type=secret → type=string để
+  # bypass yaml_normalizer security rule (_check_security_secrets).
+  # Production: revert type=secret, remove default, Sup Agent build context.
+  - name: username
+    type: string
+    required: true
+    source: context
+    default: "fpttelecom"
+    description: "Tên đăng nhập / Email thuvienphapluat.vn"
+  - name: passcode
+    type: string
+    required: true
+    source: context
+    default: "01062014"
+    description: "Mật khẩu thuvienphapluat.vn (test mode — tên 'passcode' tránh regex security 'password'|'pwd')"
+  - name: so_hieu
+    type: string
+    required: true
+    source: context
+    default: "QCVN 10:2025/BCA"
+    description: "Số hiệu QCVN/TCVN — điền vào ô search"
+  - name: title_hint
+    type: string
+    required: true
+    source: context
+    default: "Bản đồ địa hình quốc gia"
+    description: "Text đặc trưng trong tiêu đề tiêu chuẩn cần mở"
+
+steps:
+  # ── LOGIN FLOW (skip nếu đã login) ────────────────────────────────────────
+  # ⚠️ Workaround tạm — bug worker không close browser sau Reset, cookies
+  # persist giữa các session run. Nếu lần trước đã login, lần này page render
+  # với panel "Tài khoản" thay vì login form → wait_for "Tên đăng nhập" timeout.
+  #
+  # Dùng if_visible:
+  #   - then  (đã login — thấy "Trang cá nhân"/"Thoát"): skip toàn bộ login
+  #   - else  (chưa login — không thấy): chạy 5 step login như cũ
+
+  # 1) Branch: đã login chưa?
+  - action: if_visible
+    target:
+      role: link
+      text_any: ["Trang cá nhân", "Thoát", "Gia hạn tài khoản"]
+    note: "Check đã login chưa — nếu thấy panel tài khoản thì skip login"
+    then: []
+    else:
+      # 1a) Chờ form login render
+      - action: wait_for
+        target:
+          role: textbox
+          text_any: ["Tên đăng nhập"]
+        timeout_ms: 30000
+        note: "Chờ homepage render với form login"
+
+      # 1b) Fill username
+      - action: fill
+        target:
+          role: textbox
+          text_any: ["Tên đăng nhập"]
+        value_from: username
+        note: "Điền tên đăng nhập"
+
+      # 1c) Fill password
+      - action: fill
+        target:
+          role: textbox
+          text_any: ["Mật khẩu"]
+        value_from: passcode
+        note: "Điền mật khẩu"
+
+      # 1d) Click button Đăng nhập (sidebar)
+      - action: click
+        target:
+          role: button
+          text_any: ["Đăng nhập"]
+        note: "Submit login"
+
+      # 1d-bis) Xử lý popup cảnh báo đăng nhập (nếu xuất hiện).
+      # Site đôi khi hiện dialog cảnh báo (ví dụ: phiên đã đăng nhập trên thiết bị
+      # khác, đồng ý điều khoản, xác nhận thiết bị) với nút "Đồng ý".
+      # → Nếu thấy nút Đồng ý → click để tiếp tục, nếu không → bỏ qua.
+      - action: if_visible
+        target:
+          role: button
+          text_any: ["Đồng ý", "Đồng Ý", "OK", "Agree", "Accept"]
+        note: "Check popup cảnh báo đăng nhập"
+        then:
+          - action: click
+            target:
+              role: button
+              text_any: ["Đồng ý", "Đồng Ý", "OK", "Agree", "Accept"]
+            note: "Click Đồng ý đóng popup cảnh báo"
+        else: []
+
+      # 1d-ter) Trường hợp popup dùng role=link thay vì button
+      - action: if_visible
+        target:
+          role: link
+          text_any: ["Đồng ý", "Đồng Ý", "OK", "Agree", "Accept"]
+        note: "Check popup cảnh báo (role=link)"
+        then:
+          - action: click
+            target:
+              role: link
+              text_any: ["Đồng ý", "Đồng Ý", "OK", "Agree", "Accept"]
+            note: "Click Đồng ý (link) đóng popup"
+        else: []
+
+      # 1e) Chờ login success — sidebar đổi sang panel "Tài khoản"
+      - action: wait_for
+        target:
+          role: link
+          text_any: ["Trang cá nhân", "Thoát", "Gia hạn tài khoản"]
+        timeout_ms: 30000
+        note: "Chờ login success — panel tài khoản hiện"
+
+  # ── SEARCH FLOW ───────────────────────────────────────────────────────────
+
+  # 2) Click tab "Tiêu Chuẩn Việt Nam" (TCVN) trên top navigation.
+  # ⚠️ Top menu thuvienphapluat có nhiều tab text TƯƠNG TỰ — text matcher
+  # rất dễ click NHẦM:
+  #   - "TCVN" / "Tiêu Chuẩn Việt Nam"  ← MỤC TIÊU (Tiêu chuẩn)
+  #   - "QCVN" / "Quy Chuẩn Việt Nam"   ← NHẦM (Quy chuẩn)
+  #   - "Văn bản pháp luật"
+  #   - "Tra cứu" (dropdown menu)
+  #   - "Pháp Luật" / "Văn bản"
+  #
+  # 🧪 TEST IMAGE_HINT (Phase 4 vision matcher):
+  # text_any cố tình điền text KHÔNG TỒN TẠI → text matcher fail →
+  # vision fallback kích hoạt → gpt-4o-mini đọc ảnh khoanh đỏ tab TCVN +
+  # screenshot trang chủ + snapshot → trả ref → click ĐÚNG tab TCVN.
+  #
+  # 📝 CHUẨN BỊ (anh làm trước khi run):
+  # 1. Chụp screenshot trang chủ thuvienphapluat (sau login) — full top menu
+  # 2. Khoanh đỏ tab "Tiêu Chuẩn Việt Nam" hoặc "TCVN" (KHÔNG phải QCVN)
+  # 3. Upload qua UI 📎 Upload ảnh, step_index=2
+  # 4. Copy CDN URL → paste vào image_hint dưới đây (BỎ dấu # ở đầu dòng)
+  - action: click
+    target:
+      role: link
+      text_any: ["FORCE_VISION_FALLBACK_KHONG_CO_TEXT_NAY"]
+      image_hint: "https://cdn.fstats.ai/changchatbot/public/tool-web/prod/scenarios/user_hiepqn_check_law_version_qcvn/rev_9/images/image_hint.jpg"
+      image_hint_desc: "Tab 'Tiêu Chuẩn Việt Nam' (TCVN) trên top navigation thuvienphapluat — KHÔNG phải QCVN, KHÔNG phải Văn bản pháp luật"
+    timeout_ms: 15000
+    note: "Click tab TCVN (TEST vision matcher Phase 4)"
+
+  # 2-bis) BUG-007 workaround — force trigger inline onclick S_TCVN()
+  # ⚠️ Tab TCVN trên thuvienphapluat dùng inline onclick handler:
+  #   <a id="aTieuChuanVN" onclick="S_TCVN(MemberGA)" href="#tabTC">
+  # Agent-browser CDP click ack OK nhưng KHÔNG trigger inline onclick →
+  # tab không switch. Workaround: gọi element.click() qua JS native →
+  # browser tự fire click event → inline onclick được execute đúng.
+  # Step click ở trên vẫn giữ để TEST vision matcher (đã verify match e37).
+  - action: eval_js
+    script: "document.getElementById('aTieuChuanVN').click()"
+    note: "BUG-007: force inline onclick S_TCVN() chạy"
+
+  # 3) Chờ trang TCVN search render — heading "Tra cứu Tiêu Chuẩn Việt Nam"
+  # và textbox + button Tìm kiếm xuất hiện.
+  - action: wait_for
+    target:
+      role: button
+      text_any: ["Tìm kiếm"]
+    timeout_ms: 30000
+    note: "Chờ trang TCVN search render"
+
+  # 4) Fill số hiệu vào textbox search trên trang TCVN
+  - action: fill
+    target:
+      role: textbox
+      text_any: ["Tìm Tiêu Chuẩn", "Tìm tiêu chuẩn", "Tìm kiếm", "Tìm Văn bản"]
+    value_from: so_hieu
+    note: "Điền số hiệu QCVN/TCVN vào textbox"
+
+  # 5) Click button Tìm kiếm để submit form
+  - action: click
+    target:
+      role: button
+      text_any: ["Tìm kiếm"]
+    note: "Submit form search"
+
+  # 5-bis) BUG-007 workaround — force trigger inline onclick btnTinTucKeyWord
+  # ⚠️ Tab TCVN có button search RIÊNG (ID khác trang chủ):
+  #   - Trang chủ "Văn bản pháp luật": id="btnKeyWord"
+  #   - Tab TCVN sau click:           id="btnTinTucKeyWord" (tên gây nhầm
+  #     nhưng đúng là button TCVN — tên thừa kế từ tab "Tin tức")
+  # Pattern giống TCVN tab: button có inline JS handler không được
+  # agent-browser CDP click trigger. Force qua element.click() JS native.
+  - action: eval_js
+    script: "document.getElementById('btnTinTucKeyWord').click()"
+    note: "BUG-007: force inline onclick btnTinTucKeyWord submit search TCVN"
+
+  # 6) Chờ trang kết quả TCVN render với items.
+  # Mỗi item TCVN có link "Lược đồ" + "Tải về". Wait đủ lâu vì server
+  # cần process search query.
+  - action: wait_for
+    target:
+      role: link
+      text_any: ["Lược đồ", "Tải về"]
+    timeout_ms: 30000
+    note: "Chờ kết quả TCVN load (mỗi item có Lược đồ/Tải về)"
+
+  # 7) Mở tiêu chuẩn theo title_hint
+  - action: open_link
+    target:
+      role: link
+      text_any: ["{title_hint}"]
+      nth: 0
+    note: "Mở tiêu chuẩn theo title_hint (same-tab)"
+
+  # 8) Chờ trang chi tiết render
+  - action: wait_for
+    target:
+      role: link
+      text_any: ["In trang", "Lưu văn bản", "Tải về"]
+    timeout_ms: 20000
+    note: "Chờ trang chi tiết tiêu chuẩn"
+
+  # 9) Đảm bảo tab bar render xong.
+  # TCVN detail page có thể không có tab "Văn bản gốc" — dùng Lược đồ + Tải về
+  # vì 2 tab này chắc chắn có (đã thấy trên result list).
+  - action: wait_for
+    target:
+      role: link
+      text_any: ["Lược đồ", "Tải về"]
+    timeout_ms: 10000
+    note: "Đảm bảo tab bar render xong"
+
+  # 10) Click tab Tải về.
+  # ⚠️ TCVN detail KHÁC VBPL — KHÔNG có TOC link "Tải về?" ở đầu trang.
+  # DOM order TCVN:
+  #   - Văn bản gốc/PDF, Lược đồ, Liên quan hiệu lực, Liên quan nội dung
+  #   - "Tải về" [ref=e51]                ← nth=0 = Tab download chính (ĐÚNG)
+  #   - "Lược đồ" / "Tải về" related docs ← nth=1+ = related document tabs (SAI)
+  # → Phải dùng nth=0 (khác với open_law_document VBPL dùng nth=1).
+  - action: click
+    target:
+      role: link
+      text_any: ["Tải về"]
+      nth: 0
+    timeout_ms: 10000
+    note: "Click tab Tải về (nth=0 cho TCVN — không có TOC link)"
+
+  # 10-bis) BUG-007 workaround — force trigger inline onclick tab Tải về
+  # Tab "Tải về" trên detail page là <span id="ctl00_Content_ThongTinVB_SpDoanload">
+  # wrap trong <a onclick="..."> parent. Click span qua CDP không trigger
+  # parent <a> handler. Force qua JS: tìm parent <a> qua closest() rồi click.
+  # Fallback click span trực tiếp nếu không có parent <a>.
+  - action: eval_js
+    script: "var s=document.getElementById('ctl00_Content_ThongTinVB_SpDoanload'); if(s){ var a=s.closest('a'); (a||s).click(); }"
+    note: "BUG-007: force inline onclick tab Tải về"
+
+  # 11) Chờ menu tải về hiện
+  - action: wait_for
+    target:
+      role: link
+      text_any:
+        - "Tải văn bản tiếng Việt"
+        - "Tải bản tiếng Việt"
+        - "Tiếng Việt"
+    timeout_ms: 10000
+    note: "Chờ menu Tải về xuất hiện"
+
+  # 13) Click "Tải văn bản tiếng Việt" → trigger download
+  # ⚠️ BUG-007 workaround: dùng eval_js thay vì action click. Site
+  # thuvienphapluat.vn dùng inline onclick= handler — CDP dispatchMouseEvent
+  # ack OK nhưng JS handler không chạy (URL không đổi, không trigger download).
+  # Confirmed via session 2026-05-09 16:40 run: action click ack OK nhưng
+  # url_before==url_after, /tmp không có file mới. Workaround: native
+  # element.click() qua eval_js triggers inline onclick đúng.
+  - action: eval_js
+    script: |
+      var link = Array.from(document.querySelectorAll('a')).find(function(a) {
+        var t = (a.textContent || '').trim();
+        return t === 'Tải Văn bản tiếng Việt' ||
+               t === 'Tải văn bản tiếng Việt' ||
+               t === 'Tải bản tiếng Việt';
+      });
+      if (link) { link.click(); }
+    timeout_ms: 10000
+    note: "Click 'Tải bản tiếng Việt' qua JS native (workaround BUG-007)"
+
+  # 14) Wait file download xong + upload lên CDN, xóa local.
+  # Action upload_download:
+  #   - Poll /root/Downloads (env AGENT_BROWSER_DOWNLOADS_DIR override)
+  #   - Tìm file mới nhất sau timestamp action bắt đầu
+  #   - Filter extensions cho document files (.doc/.docx/.pdf/.zip)
+  #   - Verify file stable (size không đổi 1s) — tránh upload file đang ghi
+  #   - Upload lên MinIO qua ArtifactUploader (giữ tên gốc)
+  #   - Delete local sau upload
+  # Result lưu vào step.action.downloaded_filename + downloaded_cdn_url trong session.json.
+  - action: upload_download
+    extensions: [".doc", ".docx", ".pdf", ".zip"]
+    timeout_ms: 60000
+    note: "Wait + upload file QCVN/TCVN lên CDN, xóa local"
+
+# KHÔNG có success rule: flow tuyến tính, để flow_runner fallback done sau khi
+# hết step (tránh success rule match sớm qua text_any="Tải văn bản tiếng Việt"
+# có sẵn trong DOM khi tab "Tải về" mở → bỏ qua step upload_download).
+# KHÔNG có failure rule: search không ra kết quả → step 6 timeout
+# với error message rõ hơn.

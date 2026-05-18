@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -21,7 +22,7 @@ from state import ARTIFACTS_DIR, StepRecord
 from .action_registry import ActionResult, get_action
 from .actions import *  # noqa: F401,F403  — trigger action registration
 from .flow_models import Condition, FlowStep, SuccessRule, TargetSpec
-from .snapshot_query import find_ref
+from .snapshot_query import find_ref, find_refs
 
 
 def _resolve_placeholders(value, ctx: dict):
@@ -96,11 +97,97 @@ class FlowRuntime:
     last_snapshot: str = ""
     step_count: int = 0
     run_dir: Optional[Path] = None
+    # Visual Hint Targeting (Phase 4) — vision matcher fallback config
+    api_key: str = ""                                # OpenAI key cho vision call
+    vision_calls_used: int = 0
+    vision_calls_cap: int = 5                        # configurable per session
+    vision_matches: list = field(default_factory=list)  # telemetry — Phase 5
     _secret_fields: set[str] = field(default_factory=set)
     _pending_nested: Optional[list] = None   # set bởi if_visible
 
     def is_secret_field(self, name: str) -> bool:
         return name in self._secret_fields
+
+    def find_ref_with_vision(
+        self, target: TargetSpec, snapshot: str
+    ) -> Optional[str]:
+        """Text matcher first; vision fallback nếu fail và target.image_hint có.
+
+        Cap per-session — vượt cap → trả None (không gọi vision nữa).
+        Snapshot phải truyền vào (caller đã ensure fresh) để cùng 1 snapshot
+        dùng cho cả text matcher lẫn vision validate.
+        """
+        ref = find_ref(snapshot, target)
+        if ref is not None:
+            return ref
+
+        image_hint = getattr(target, "image_hint", None)
+        if not image_hint:
+            return None
+
+        if self.vision_calls_used >= self.vision_calls_cap:
+            _log.warning(
+                "vision_matcher: session=%s exceeded cap %d — skip",
+                self.session_id, self.vision_calls_cap,
+            )
+            return None
+
+        if not self.api_key:
+            _log.warning(
+                "vision_matcher: api_key trống — skip vision fallback"
+            )
+            return None
+
+        # Take fresh screenshot for vision matcher (run_dir is required —
+        # if no run_dir, skip vision because we have nowhere to save).
+        if self.run_dir is None:
+            _log.warning(
+                "vision_matcher: no run_dir — skip"
+            )
+            return None
+
+        screenshot_path = ""
+        try:
+            attempt_idx = self.vision_calls_used
+            target_path = (
+                self.run_dir
+                / f"vision_step_{self.step_count:02d}_{attempt_idx}.png"
+            )
+            try:
+                _, screenshot_path = self.browser.take_screenshot(
+                    save_path=str(target_path), full_page=False,
+                )
+            except TypeError:
+                _, screenshot_path = self.browser.take_screenshot(
+                    save_path=str(target_path),
+                )
+        except Exception as e:
+            _log.warning("vision_matcher: take_screenshot fail: %s", e)
+            return None
+
+        if not screenshot_path:
+            return None
+
+        # Lazy import — vision_matcher pulls in OpenAI SDK
+        from services.vision_matcher import find_ref_by_image
+
+        ref = find_ref_by_image(
+            api_key=self.api_key,
+            current_screenshot_path=screenshot_path,
+            hint_image_url=image_hint,
+            snapshot_text=snapshot,
+            description=getattr(target, "image_hint_desc", "") or "",
+        )
+
+        # Increment counter sau khi gọi (kể cả fail) để cap đúng cost
+        self.vision_calls_used += 1
+        self.vision_matches.append({
+            "step_index": self.step_count,
+            "hint_url": image_hint,
+            "ref_returned": ref,
+            "screenshot_path": screenshot_path,
+        })
+        return ref
 
 
 def _capture_step_artifacts(rt: FlowRuntime, step_num: int) -> tuple[str, str, str]:
@@ -224,6 +311,11 @@ def _make_record(
     if result.ask_user:
         action_payload["ask_type"] = "question"
         action_payload["message"] = result.ask_prompt
+    # upload_download — propagate file info vào session.json để debug/audit
+    if result.downloaded_filename:
+        action_payload["downloaded_filename"] = result.downloaded_filename
+    if result.downloaded_cdn_url:
+        action_payload["downloaded_cdn_url"] = result.downloaded_cdn_url
     return StepRecord(
         step=step_num,
         goal=goal,
@@ -295,9 +387,13 @@ def run_flow(
     context: Optional[dict],
     session_id: str = "",
     browser=None,
+    api_key: str = "",
 ) -> Generator[StepRecord, Optional[str], None]:
     """Generator thực thi flow. Tương thích protocol với `run_agent_autonomous`:
     caller làm `gen.send(answer)` khi nhận record `is_blocked=True`.
+
+    `api_key` cần thiết cho vision matcher fallback (TargetSpec.image_hint).
+    Truyền rỗng → vision fallback bị skip (text-only matching).
     """
     rt = FlowRuntime(
         browser=browser or browser_module,
@@ -305,6 +401,8 @@ def run_flow(
         context=dict(context or {}),
         session_id=session_id,
         run_dir=_make_run_dir(),
+        api_key=api_key,
+        vision_calls_cap=int(os.getenv("VISION_CALLS_PER_SESSION", "5")),
         _secret_fields=_build_secret_set(spec),
     )
 

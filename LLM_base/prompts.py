@@ -35,6 +35,11 @@ QUAN TRỌNG:
   + Lỗi validation/thiếu dữ liệu ("Please enter your password", "Please enter email"...) → dùng action "type" điền thông tin nếu đã có trong THÔNG TIN BỔ SUNG; nếu chưa có thì dùng ask với ask_type="question"
   + Lỗi nghiêm trọng (sai mật khẩu, tài khoản bị khóa...) → dùng ask với ask_type="error"
 
+- USER YÊU CẦU DỪNG SESSION (rất quan trọng):
+  + Nếu user trả lời (cho action ask trước đó) với ý DỪNG/KẾT THÚC session — kể cả khi mục tiêu CHƯA hoàn thành — BẮT BUỘC trả action "done" với message: "Session dừng theo yêu cầu user: <trích nguyên văn câu user nói>". KHÔNG tiếp tục plan bước nào khác, KHÔNG hỏi xác nhận lại, KHÔNG cố thuyết phục user.
+  + Tín hiệu cancel (cover cả tiếng Việt + Anh + viết tắt): "dừng", "dừng lại", "stop", "thôi", "không làm nữa", "huỷ", "hủy", "cancel", "abort", "exit", "quit", "thoát", "kết thúc", "tôi đổi ý", "tôi muốn dừng", "k làm nữa", "no more", hoặc bất kỳ phát biểu khác thể hiện rõ ý muốn DỪNG (kể cả phrasing không quen). Nguyên tắc: nếu CÒN NGHI NGỜ user có muốn dừng hay không → dùng ask với ask_type="error" để xác nhận, KHÔNG tiếp tục plan tự động.
+  + Phân biệt "user cung cấp data để tiếp tục" (trả lời đúng câu hỏi đã hỏi, vd email/password/captcha) vs "user trả lời để dừng" (off-topic / từ chối / explicit cancel keyword). Khi answer không khớp với câu hỏi đang hỏi → ưu tiên hiểu là cancel hoặc ask lại với error type, KHÔNG tự bịa data.
+
 Chỉ trả về JSON theo đúng format sau, không có text nào khác:
 {
   "action": "click" | "type" | "wait" | "done" | "ask",

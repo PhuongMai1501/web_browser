@@ -40,6 +40,25 @@ from store.session_store import set_screenshot_sync, update_sync
 _log = logging.getLogger(__name__)
 
 
+# Cancel keywords — khi user reply qua /resume với các phrase này, worker
+# coi như intent cancel session (thay vì forward cho LLM). Sup Agent custom
+# mode forward text user chat → tránh trường hợp LLM không hiểu intent.
+# Strict match exact (sau strip+lower) để tránh false positive khi user nói
+# "không dừng lại" hay "đừng dừng".
+_CANCEL_KEYWORDS = frozenset({
+    # Vietnamese
+    "tạm dừng", "tạm dừng đi", "tạm dừng lại",
+    "dừng", "dừng đi", "dừng lại", "dừng lại đi",
+    "hủy", "huỷ", "hủy đi", "huỷ đi", "hủy bỏ", "huỷ bỏ",
+    "thoát", "thoát ra", "thoát đi",
+    "kết thúc", "kết thúc đi",
+    "thôi", "thôi đi", "đủ rồi",
+    # English
+    "stop", "cancel", "abort", "quit", "exit",
+    "stop it", "cancel it", "stop please", "cancel please",
+})
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -318,6 +337,12 @@ def run_job_sync(
                             annotated_path, session_id, record.step, suffix="-annotated"
                         ) or ""
 
+                # Ưu tiên ảnh annotated (có khoanh đỏ element được click) khi
+                # gửi qua field `screenshot_url` cho Sup Agent/Frontend hiển thị.
+                # Fallback raw screenshot khi step không có annotation (wait,
+                # navigate, eval_js — không click element nào).
+                display_cdn = annotated_cdn or screenshot_cdn
+
                 # ── Lưu vào Redis: CDN URL nếu có, fallback local path ──
                 screenshot_redis = screenshot_cdn or record.screenshot_path or ""
                 annotated_redis = annotated_cdn or (annotated_path if Path(annotated_path).exists() else "") if annotated_path else ""
@@ -331,10 +356,17 @@ def run_job_sync(
 
                 if record.is_blocked:
                     ask_ev = record_to_ask_event(record, session_id,
-                                                 screenshot_url_override=screenshot_cdn)
+                                                 screenshot_url_override=display_cdn)
                     push("ask", ask_ev.model_dump())
                     log_svc.log_session(session_id, "ask", step=record.step,
                                         message=record.action.get("message", ""))
+
+                    # Upload session log NGAY trước khi block — admin/Sup Agent
+                    # có thể fetch log mid-session để debug khi worker đang chờ user.
+                    try:
+                        log_svc.upload_session_log(session_id)
+                    except Exception as _e:
+                        _log.warning(f"[{session_id}] mid-session log upload failed: {_e}")
 
                     # Callback mode: chờ vô hạn (timeout=0)
                     # SSE mode: chờ ASK_TIMEOUT_S
@@ -368,15 +400,31 @@ def run_job_sync(
                         break
 
                     answer = msg.get("answer", "")
+                    answer_norm = answer.strip().lower()
+
+                    # Cancel intent — user reply với keyword cancel (vd "tạm dừng đi",
+                    # "stop", "hủy"). Tool-web tự cancel thay vì forward cho LLM
+                    # (LLM thường không hiểu intent cancel → loop ask_user vô tận).
+                    if answer_norm in _CANCEL_KEYWORDS:
+                        cancel_reason = f"User cancel: '{answer.strip()}'"
+                        push("cancelled", {"reason": cancel_reason})
+                        update_sync(sync_r, session_id,
+                                    status="cancelled", finished_at=_now())
+                        log_svc.log_session(session_id, "cancelled",
+                                            step=record.step,
+                                            trigger="user_cancel_keyword",
+                                            answer=answer.strip())
+                        _persist_artifacts("cancelled", cancel_reason, "", record.step)
+                        break
 
                     # confirm_done: Sup-Agent xác nhận hoàn thành → done ngay, không gửi lại LLM
-                    if answer.strip().lower() == "confirm_done":
+                    if answer_norm == "confirm_done":
                         duration = time.time() - session_start
                         done_payload = {
                             "step": record.step,
                             "message": "Sup-Agent xác nhận hoàn thành.",
                             "url_after": record.url_after or "",
-                            "screenshot_url": screenshot_cdn or "",
+                            "screenshot_url": display_cdn or "",
                             "total_steps": record.step,
                             "duration_seconds": round(duration, 1),
                         }
@@ -397,7 +445,7 @@ def run_job_sync(
                 if record.is_done:
                     duration = time.time() - session_start
                     done_ev = record_to_done_event(record, session_id, record.step, duration,
-                                                   screenshot_url_override=screenshot_cdn)
+                                                   screenshot_url_override=display_cdn)
                     done_payload = done_ev.model_dump()
                     # Callback mode: thêm result_url vào done payload
                     if is_callback_mode:
@@ -416,7 +464,7 @@ def run_job_sync(
                     break
 
                 step_ev = record_to_step_event(record, session_id,
-                                               screenshot_url_override=screenshot_cdn,
+                                               screenshot_url_override=display_cdn,
                                                annotated_url_override=annotated_cdn)
                 push("step", step_ev.model_dump())
                 log_svc.log_session(session_id, "step", step=record.step,
@@ -441,6 +489,15 @@ def run_job_sync(
             log_svc.upload_session_log(session_id)
         except Exception as e:
             _log.warning(f"[{session_id}] Session log upload failed: {e}")
+        # Đóng browser sau mỗi session để clear cookies/SSO state — tránh leak
+        # tài khoản giữa các session khi user click Reset hoặc khởi tạo session mới.
+        # Match hành vi legacy api.py /v1/browser/reset (đã gọi close_browser trực tiếp).
+        try:
+            from browser_adapter import close_browser
+            close_browser()
+            _log.info(f"[{worker_id}] Closed browser after session {session_id}")
+        except Exception as e:
+            _log.warning(f"[{session_id}] close_browser failed: {e}")
         # Clean up resume queue
         sync_r.delete(f"resume:{session_id}")
         _log.info(f"[{worker_id}] Session {session_id} finished (mode={'callback' if is_callback_mode else 'sse'})")

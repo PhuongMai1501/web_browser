@@ -66,6 +66,7 @@ def run_scenario(
                 context=context,
                 session_id=session_id,
                 browser=browser,
+                api_key=api_key,
             )
         finally:
             if domain_override_set:

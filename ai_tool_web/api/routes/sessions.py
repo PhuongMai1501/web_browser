@@ -8,6 +8,7 @@ from config import MAX_STEPS_CAP, MIN_STEPS
 from models import RunRequest, SessionCreatedResponse, SessionStatusResponse
 from services import scenario_service
 from services.scenario_service import ContextValidationError
+from services.yaml_normalizer import normalize_yaml
 from store import job_queue, session_store
 from store.redis_client import get_async_redis
 
@@ -25,13 +26,52 @@ async def create_session(req: RunRequest):
     if not api_key:
         raise HTTPException(500, detail="OPENAI_API_KEY not set")
 
-    # Load + validate spec tại thời điểm enqueue; embed snapshot để job
-    # không bị ảnh hưởng nếu admin sửa spec giữa chừng.
-    spec = await scenario_service.get_async(redis, req.scenario)
-    if spec is None:
-        raise HTTPException(404, detail=f"Scenario '{req.scenario}' không tồn tại")
-    if not spec.enabled:
-        raise HTTPException(409, detail=f"Scenario '{req.scenario}' đang bị disabled")
+    # Hai mode:
+    #  - YAML inline: req.scenario_yaml set → parse ad-hoc spec, không cần DB lookup
+    #  - DB lookup (default): scenario_service.get_async(req.scenario)
+    if req.scenario_yaml:
+        # Auto-gen scenario id để tracking (không lưu DB)
+        custom_id = f"_custom_{uuid.uuid4().hex[:8]}"
+        result = normalize_yaml(req.scenario_yaml, force_id=custom_id)
+        if not result.parse_ok:
+            error_msgs = [f"{e.field}: {e.message}" for e in result.errors]
+            raise HTTPException(
+                422,
+                detail=f"YAML parse fail: {'; '.join(error_msgs)}",
+            )
+        if not result.validation_ok or result.spec is None:
+            error_msgs = [f"{e.field}: {e.message}" for e in result.errors]
+            raise HTTPException(
+                422,
+                detail=f"YAML validation fail: {'; '.join(error_msgs)}",
+            )
+        spec = result.spec
+        # Override req.scenario để log nhất quán (kể cả user truyền tên khác)
+        req.scenario = spec.id
+    else:
+        # Load + validate spec tại thời điểm enqueue; embed snapshot để job
+        # không bị ảnh hưởng nếu admin sửa spec giữa chừng.
+        spec = await scenario_service.get_async(redis, req.scenario)
+        if spec is None:
+            raise HTTPException(404, detail=f"Scenario '{req.scenario}' không tồn tại")
+        if not spec.enabled:
+            raise HTTPException(409, detail=f"Scenario '{req.scenario}' đang bị disabled")
+
+    # Auto-inject inputs[].default vào context cho field required nhưng caller
+    # KHÔNG truyền. Dùng cho YAML scenario có credentials hardcoded (test mode
+    # Sup Agent paste YAML, không gửi context riêng).
+    # Security: secret field type=secret KHÔNG nên có default (yaml_normalizer
+    # _check_security_secrets sẽ raise validation error nếu paste vào YAML).
+    if spec.inputs:
+        ctx_with_defaults = dict(req.context or {})
+        for inp in spec.inputs:
+            if inp.source != "context":
+                continue
+            if inp.name not in ctx_with_defaults or ctx_with_defaults[inp.name] in (None, ""):
+                if inp.default is not None:
+                    ctx_with_defaults[inp.name] = inp.default
+        req.context = ctx_with_defaults
+
     try:
         scenario_service.validate_context(spec, req.context)
     except ContextValidationError as e:
