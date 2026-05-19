@@ -61,3 +61,7 @@ class ActionResult:
     nested: Optional[list] = None   # kết quả các action con (cho if_visible)
     downloaded_filename: str = ""   # filename file đã upload (action upload_download)
     downloaded_cdn_url: str = ""    # CDN URL sau upload (action upload_download)
+    # Text/label readable của element vừa tác động — UI hiển thị "đã click <X>"
+    # thay vì hiển thị ref selector. Rỗng cho action không tác động element
+    # (goto, wait_for, eval_js không có target). Set bởi click/fill/open_link.
+    target_label: str = ""

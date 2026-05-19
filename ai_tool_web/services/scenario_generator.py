@@ -165,6 +165,59 @@ TEXT_ANY:
 - Matcher case-insensitive, partial match.
 - Bao gồm nhiều variant nếu site đôi khi đổi text (vd ["Đăng nhập", "Login"]).
 
+⚠️ KHÔNG ĐOÁN TEXT GENERIC KHÔNG TỒN TẠI TRÊN DOM:
+- Báo điện tử (vnexpress, dantri, tuoitre...) KHÔNG có element với label
+  "Tin nổi bật" / "Bài viết nổi bật" / "Bài hot". Card bài chỉ chứa title
+  thật của bài (vd "Hà Nội mở rộng quốc lộ 1 lên 16 làn xe").
+- Khi user nói "bài top" / "bài nổi bật" / "bài đầu tiên" → DÙNG vị trí
+  (nth=0 trên role=heading level=3) thay vì text_any đoán mò.
+- Khi user nói "click vào bài X cụ thể" → mới dùng text_any=[<title bài X>].
+
+SITE CHEAT SHEET — selector pattern thực tế (Vietnamese news sites):
+
+| Site                | "Bài top trên home"          | "Title bài chi tiết" | "Sapo/tóm tắt" |
+|---------------------|------------------------------|----------------------|----------------|
+| vnexpress.net       | role=heading level=3 nth=0   | heading level=1      | paragraph đầu  |
+| dantri.com.vn       | role=heading level=3 nth=0   | heading level=1      | paragraph đầu  |
+| tuoitre.vn          | role=heading level=3 nth=0   | heading level=1      | paragraph đầu  |
+| thanhnien.vn        | role=heading level=3 nth=0   | heading level=1      | paragraph đầu  |
+| zingnews.vn         | role=heading level=2 nth=0   | heading level=1      | paragraph đầu  |
+| vietnamnet.vn       | role=heading level=3 nth=0   | heading level=1      | paragraph đầu  |
+
+⚠️ CHỌN `click` HAY `open_link` (CỰC KỲ QUAN TRỌNG):
+- `click`: support đầy đủ target (role, level, nth, text_any). Dùng khi
+  selector dựa trên VỊ TRÍ/ROLE (vd "heading h3 đầu tiên").
+- `open_link`: BẮT BUỘC phải có target.text_any/text_all (logic internal
+  tìm <a> theo innerText qua JS eval). Dùng khi user chỉ định TEXT CỤ THỂ
+  của link (vd "Tải bản tiếng Việt", "Đăng nhập").
+- ❌ KHÔNG dùng open_link với role+nth không kèm text_any → action raise
+  "open_link hiện chỉ support target.text_any / text_all".
+
+VÍ DỤ ĐÚNG cho "lấy bài top vnexpress":
+```yaml
+- action: wait_for
+  target: { role: heading, level: 3 }
+  timeout_ms: 30000
+- action: click              # ← click (không phải open_link) vì dùng role+nth
+  target: { role: heading, level: 3, nth: 0 }
+- action: wait_for
+  target: { role: heading, level: 1 }   # trang chi tiết
+- action: extract_data
+  prompt: "Đọc bài và trả về title (h1), summary (sapo), published_time"
+```
+
+VÍ DỤ SAI 1 (đoán mò text không có trên DOM):
+```yaml
+- action: wait_for
+  target: { role: link, text_any: ["Tin nổi bật", "Bài hot"] }  # ❌ KHÔNG tồn tại
+```
+
+VÍ DỤ SAI 2 (open_link thiếu text_any):
+```yaml
+- action: open_link
+  target: { role: heading, level: 3, nth: 0 }  # ❌ open_link bắt buộc text_any
+```
+
 INPUTS RULES:
 - Field name KHÔNG được match regex `password|pwd|secret|token|api[_-]?key` nếu type=string.
 - Nếu type=secret → tool-web tự mask trong log.

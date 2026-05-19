@@ -98,36 +98,16 @@ class ArtifactUploader:
 
     def should_upload(self, record) -> bool:
         """
-        Upload policy.
+        Upload policy — upload mọi step có screenshot_path.
 
-        Upload khi:
-          - Agent bị block (ask)
-          - Agent hoàn thành (done)
-          - Step có lỗi
-          - URL thay đổi (redirect xảy ra — dấu hiệu action quan trọng)
+        Trước đây selective (chỉ block/done/error/url_changed) để tiết kiệm
+        CDN storage, nhưng dẫn tới UX "no screenshot" cho nhiều step →
+        khó debug + user confuse. Đổi sang upload-all (2026-05-19).
 
-        Bỏ qua:
-          - Step wait
-          - Step click/type thông thường không có redirect
+        Skip duy nhất: record không có screenshot_path (vd action eval_js
+        không capture screenshot).
         """
-        action_type = ""
-        if isinstance(record.action, dict):
-            action_type = record.action.get("action", "")
-
-        if record.is_blocked or record.is_done:
-            return True
-        if getattr(record, "error", ""):
-            return True
-        url_changed = (
-            getattr(record, "url_before", "")
-            and getattr(record, "url_after", "")
-            and record.url_before != record.url_after
-        )
-        if url_changed:
-            return True
-        if action_type == "wait":
-            return False
-        return False
+        return bool(getattr(record, "screenshot_path", ""))
 
     # ── Internal ───────────────────────────────────────────────────────────────
 

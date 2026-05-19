@@ -259,6 +259,32 @@ def find_ref(snapshot: str, target: TargetSpec) -> Optional[str]:
     return refs[idx]
 
 
+def lookup_element(snapshot: str, ref: str) -> Optional[ElementRecord]:
+    """Tìm ElementRecord theo ref trong snapshot. None nếu không có.
+
+    Dùng để extract text/label của element vừa match — UI hiển thị
+    "đã click nút X" cho user dễ hiểu thay vì hiển thị ref selector.
+    """
+    if not ref:
+        return None
+    for rec in parse_snapshot(snapshot):
+        if rec.ref == ref:
+            return rec
+    return None
+
+
+def element_label(snapshot: str, ref: str) -> str:
+    """Trả label readable của element theo ref.
+
+    Ưu tiên: label > aria-label > text > placeholder. Rỗng nếu không tìm thấy.
+    Dùng cho UI hiển thị "Tool-web vừa click nút <label>".
+    """
+    rec = lookup_element(snapshot, ref)
+    if rec is None:
+        return ""
+    return _element_text(rec)
+
+
 class TargetNotFound(RuntimeError):
     """Không tìm thấy element theo TargetSpec trong snapshot hiện tại."""
 

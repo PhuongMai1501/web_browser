@@ -7,7 +7,7 @@ Nếu InputField có type=secret, log sẽ mask thành `***`.
 from __future__ import annotations
 
 from ..action_registry import ActionResult, action
-from ..snapshot_query import describe_target, find_ref
+from ..snapshot_query import describe_target, element_label, find_ref
 
 
 @action("fill")
@@ -59,9 +59,11 @@ def run_fill(rt, step) -> ActionResult:
     # Mask nếu secret
     is_secret = rt.is_secret_field(field_name) if field_name else False
     shown = "***" if is_secret else value
+    label = element_label(snapshot, ref)
     return ActionResult(
         ok=True, action_type="fill", ref_used=ref,
         text_typed=shown,
+        target_label=label,
         reason=(
             step.note
             or f"Điền {'(secret) ' if is_secret else ''}vào {describe_target(step.target)}"

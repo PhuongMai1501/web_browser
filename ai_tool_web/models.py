@@ -84,6 +84,11 @@ class StepEvent(BaseModel):
     # cho user qua `downloaded_cdn_url`. Rỗng cho mọi action khác.
     downloaded_filename: str = ""
     downloaded_cdn_url: str = ""
+    # Text/label readable của element vừa tác động (click button "Đăng nhập",
+    # fill field "Email"...). UI Sup Agent hiển thị "Tool-web vừa click nút
+    # <X>" thay vì hiển thị ref selector. Rỗng cho action không có target
+    # (goto, wait_for, eval_js, extract_data).
+    target_label: str = ""
 
 
 class AskEvent(BaseModel):
@@ -273,6 +278,7 @@ def record_to_step_event(
         timestamp=record.timestamp or "",
         downloaded_filename=action.get("downloaded_filename") or "",
         downloaded_cdn_url=action.get("downloaded_cdn_url") or "",
+        target_label=action.get("target_label") or "",
     )
 
 

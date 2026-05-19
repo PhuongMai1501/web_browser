@@ -99,6 +99,7 @@ def run_open_link(rt, step) -> ActionResult:
     return ActionResult(
         ok=True, action_type="open_link",
         url_before=url_before, url_after=url_after,
+        target_label=matched_text[:160],  # innerText của <a> đã match
         reason=step.note or f"Nav tới link '{matched_text[:60]}' (same-tab)",
     )
 

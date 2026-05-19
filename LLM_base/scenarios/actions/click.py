@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from ..action_registry import ActionResult, action
-from ..snapshot_query import describe_target, find_ref
+from ..snapshot_query import describe_target, element_label, find_ref
 
 
 @action("click")
@@ -39,10 +39,14 @@ def run_click(rt, step) -> ActionResult:
     except Exception:
         pass
     url_after = _safe_url(rt.browser)
+    # Capture element text/label TRƯỚC khi invalidate snapshot — UI hiển thị
+    # "đã click nút <X>" thay vì ref selector.
+    label = element_label(snapshot, ref)
     rt.last_snapshot = ""  # invalidate — action tiếp theo phải lấy snapshot mới
     return ActionResult(
         ok=True, action_type="click", ref_used=ref,
         url_before=url_before, url_after=url_after,
+        target_label=label,
         reason=step.note or f"Click {describe_target(step.target)}",
     )
 

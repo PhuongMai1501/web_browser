@@ -13,7 +13,10 @@ MAX_STEPS_CAP = 30
 MIN_STEPS = 3
 
 # ── Session timing ─────────────────────────────────────────────────────────────
-SESSION_TTL_S = 600          # in-memory cleanup TTL (seconds after completion)
+# TTL Redis sau khi session ở terminal state (done/failed/cancelled). Tăng lên
+# 24h để dev/debug có thời gian gọi /result trace lỗi. Prod có thể giảm qua
+# env SESSION_TTL_S=600 (10 phút như cũ) để tiết kiệm Redis storage.
+SESSION_TTL_S = int(os.getenv("SESSION_TTL_S", "86400"))   # default 24h
 ASK_TIMEOUT_S = 300          # cancel if no /resume within 5 minutes
 SESSION_HARD_CAP_S = 600     # hard kill session after 10 minutes
 

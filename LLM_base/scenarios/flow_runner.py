@@ -319,6 +319,10 @@ def _make_record(
         action_payload["downloaded_filename"] = result.downloaded_filename
     if result.downloaded_cdn_url:
         action_payload["downloaded_cdn_url"] = result.downloaded_cdn_url
+    # target_label — text/label readable của element vừa tác động (chỉ set
+    # bởi click/fill/open_link). UI hiển thị "đã click <X>" cho Sup Agent.
+    if result.target_label:
+        action_payload["target_label"] = result.target_label
     return StepRecord(
         step=step_num,
         goal=goal,
