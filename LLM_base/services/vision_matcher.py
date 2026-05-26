@@ -41,6 +41,26 @@ _VISION_MAX_TOKENS = int(os.getenv("VISION_MAX_TOKENS", "20"))
 _SNAPSHOT_MAX_CHARS = 8000
 
 
+# Google Drive viewer URL pattern → direct download URL
+_GDRIVE_VIEWER_RE = re.compile(
+    r"https?://drive\.google\.com/file/d/([^/]+)/view"
+)
+
+
+def _normalize_image_url(url: str) -> str:
+    """Convert Google Drive viewer URL sang direct image URL.
+
+    GDrive `/file/d/<ID>/view` trả về HTML trang viewer, KHÔNG phải image bytes.
+    Direct URL `uc?export=view&id=<ID>` trả về image bytes (hoặc interstitial
+    confirmation cho file lớn).
+    """
+    m = _GDRIVE_VIEWER_RE.match(url)
+    if m:
+        file_id = m.group(1)
+        return f"https://drive.google.com/uc?export=view&id={file_id}"
+    return url
+
+
 def _fetch_image_b64(url_or_path: str) -> str:
     """Tải ảnh từ CDN URL hoặc đọc local path → base64.
 
@@ -50,11 +70,24 @@ def _fetch_image_b64(url_or_path: str) -> str:
     → 200 OK 487ms. Dùng default requests.get() để respect env
     HTTP_PROXY/HTTPS_PROXY.
 
+    Tự convert Google Drive viewer URL sang direct download URL. Validate
+    Content-Type response — phải là image/*. Nếu trả HTML (vd GDrive
+    interstitial) → raise ValueError với hint cho user.
+
     Raise nếu fail — caller phải bắt.
     """
     if url_or_path.startswith(("http://", "https://")):
-        resp = requests.get(url_or_path, timeout=30)
+        normalized = _normalize_image_url(url_or_path)
+        resp = requests.get(normalized, timeout=30, allow_redirects=True)
         resp.raise_for_status()
+        ct = (resp.headers.get("Content-Type", "") or "").lower()
+        if not ct.startswith("image/"):
+            raise ValueError(
+                f"URL không trả về image (Content-Type={ct!r}). "
+                f"Có thể là Google Drive interstitial hoặc HTML page. "
+                f"Hãy paste direct image URL (imgur.com/i.<id>.png, "
+                f"CDN nội bộ, hoặc raw.githubusercontent.com) thay vì viewer URL."
+            )
         return base64.b64encode(resp.content).decode()
     return base64.b64encode(Path(url_or_path).read_bytes()).decode()
 

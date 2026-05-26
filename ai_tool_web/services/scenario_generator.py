@@ -287,6 +287,52 @@ VÍ DỤ SAI — không extract value inline (regression UX):
 Khi user KHÔNG ghi value inline (vd "đăng nhập gmail"):
 - Declare inputs bình thường KHÔNG default cho cả string + secret.
 
+⚠️ EXTRACT IMAGE HINT URL TỪ QUERY:
+
+Khi query có URL ảnh + cụm chỉ định element ("như hình", "ảnh", "icon",
+"button trong ảnh", "click theo hình", ...) → extract URL, inject vào step
+click/fill GẦN NHẤT (theo position trong query) dưới dạng `image_hint`.
+Worker sẽ dùng vision matcher để disambiguate khi text matcher có nhiều
+match (vd 2 button cùng text "Đăng nhập" — 1 header navbar + 1 form submit).
+
+PATTERNS NHẬN DIỆN:
+- URL ảnh trực tiếp: `https://i.imgur.com/<id>.png`, `https://cdn.../foo.jpg`
+- Google Drive: `https://drive.google.com/file/d/<ID>/view?...` (worker tự
+  convert sang direct URL khi fetch — gen như paste, không cần đổi)
+- Cụm trong query: "như hình <URL>" / "click button <URL>" / "icon ở <URL>"
+
+VÍ DỤ ĐÚNG:
+
+Query: "click nút Đăng nhập như hình https://drive.google.com/file/d/12cVaJ4.../view"
+Gen:
+```yaml
+- action: click
+  target:
+    role: button
+    text_any: ["Đăng nhập"]
+    image_hint: "https://drive.google.com/file/d/12cVaJ4.../view"
+    image_hint_desc: "Nút Đăng nhập theo hình user cung cấp"
+```
+
+Query: "fill ô email theo ảnh https://i.imgur.com/abc.png"
+Gen:
+```yaml
+- action: fill
+  target:
+    role: textbox
+    text_any: ["Email"]
+    image_hint: "https://i.imgur.com/abc.png"
+    image_hint_desc: "Ô email theo hình"
+  value_from: email
+```
+
+LƯU Ý:
+- KHÔNG đưa URL ảnh vào step KHÔNG cần (vd wait_for) — chỉ click/fill.
+- KHÔNG forget text_any/role — image_hint chỉ disambiguate khi text matcher
+  match >1. Nếu chỉ có image_hint không text → vision tự do chậm + tốn cost.
+- Mỗi URL ảnh gán cho 1 step gần nhất theo position trong query, KHÔNG sao chép
+  cho mọi step.
+
 ⚠️ MICROSOFT AZURE SSO FLOW (RẤT QUAN TRỌNG):
 
 Khi user yêu cầu đăng nhập qua **chang.fpt.net**, **Office 365**, **SharePoint**,
