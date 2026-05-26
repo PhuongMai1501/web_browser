@@ -59,8 +59,32 @@ def _fetch_image_b64(url_or_path: str) -> str:
     return base64.b64encode(Path(url_or_path).read_bytes()).decode()
 
 
-def _build_prompt(snapshot_text: str, description: str) -> str:
+def _build_prompt(
+    snapshot_text: str,
+    description: str,
+    candidate_refs: Optional[list[str]] = None,
+) -> str:
     snapshot_short = snapshot_text[:_SNAPSHOT_MAX_CHARS]
+    if candidate_refs:
+        # Ambiguous mode: text matcher đã narrow xuống N candidates,
+        # LLM CHỈ chọn 1 trong list. Giảm hallucinate + tăng accuracy.
+        candidate_str = ", ".join(candidate_refs)
+        return (
+            "Bạn là vision matcher disambiguate cho automation browser.\n\n"
+            "ẢNH 1 (hint): User đã khoanh đỏ element họ muốn click.\n"
+            "ẢNH 2 (current): Screenshot trang hiện tại của browser.\n"
+            "SNAPSHOT (accessibility tree, mỗi element có ref dạng e<N>):\n"
+            f"{snapshot_short}\n\n"
+            f"MÔ TẢ BỔ SUNG: {description or '(không có)'}\n\n"
+            f"⚠️ CANDIDATES — Text matcher đã narrow xuống {len(candidate_refs)} ref "
+            f"khả thi: [{candidate_str}]\n"
+            "Bạn PHẢI chọn DUY NHẤT 1 ref TỪ DANH SÁCH TRÊN — element nào "
+            "tương đương với vùng đỏ trong ẢNH 1 (cùng vai trò, vị trí, "
+            "nội dung). KHÔNG được chọn ref ngoài danh sách.\n\n"
+            "Trả về CHÍNH XÁC ref dạng e<số> (1 trong các candidates), "
+            "không giải thích. Nếu không có candidate nào match hint → NOT_FOUND."
+        )
+    # Default mode: tìm trong toàn snapshot (text matcher fail hoàn toàn)
     return (
         "Bạn là vision matcher cho automation browser.\n\n"
         "ẢNH 1 (hint): User đã khoanh đỏ element họ muốn click.\n"
@@ -86,6 +110,7 @@ def find_ref_by_image(
     hint_image_url: str,
     snapshot_text: str,
     description: str = "",
+    candidate_refs: Optional[list[str]] = None,
 ) -> Optional[str]:
     """Trả ref tìm thấy trong snapshot, hoặc None.
 
@@ -115,7 +140,7 @@ def find_ref_by_image(
                      current_screenshot_path, e)
         return None
 
-    prompt = _build_prompt(snapshot_text, description)
+    prompt = _build_prompt(snapshot_text, description, candidate_refs)
     try:
         client = OpenAI(api_key=api_key, timeout=_VISION_TIMEOUT)
         resp = client.chat.completions.create(
@@ -162,6 +187,13 @@ def find_ref_by_image(
     if f"ref={ref}" not in snapshot_text:
         _log.warning(
             "vision_matcher: ref %s hallucinated, not in snapshot", ref,
+        )
+        return None
+    # Validate ambiguous mode: ref phải nằm trong candidates list nếu cung cấp
+    if candidate_refs and ref not in candidate_refs:
+        _log.warning(
+            "vision_matcher: ref %s not in candidates %s — LLM ignored constraint",
+            ref, candidate_refs,
         )
         return None
 

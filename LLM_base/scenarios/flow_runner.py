@@ -97,8 +97,9 @@ class FlowRuntime:
     last_snapshot: str = ""
     step_count: int = 0
     run_dir: Optional[Path] = None
-    # Dict shared với caller để expose extracted_data ra ngoài generator.
-    # Action `extract_data` ghi vào `output_holder["data"]`.
+    # Dict shared với caller (job_handler) để expose extracted_data ra ngoài
+    # generator. Action `extract_data` ghi vào `output_holder["data"]` — caller
+    # đọc sau khi generator close. None = caller không quan tâm output.
     output_holder: Optional[dict] = None
     # Visual Hint Targeting (Phase 4) — vision matcher fallback config
     api_key: str = ""                                # OpenAI key cho vision call
@@ -114,20 +115,59 @@ class FlowRuntime:
     def find_ref_with_vision(
         self, target: TargetSpec, snapshot: str
     ) -> Optional[str]:
-        """Text matcher first; vision fallback nếu fail và target.image_hint có.
+        """Text matcher first; vision fallback hoặc disambiguate khi cần.
 
-        Cap per-session — vượt cap → trả None (không gọi vision nữa).
-        Snapshot phải truyền vào (caller đã ensure fresh) để cùng 1 snapshot
-        dùng cho cả text matcher lẫn vision validate.
+        Logic:
+        - 0 candidate + image_hint → vision fallback (tìm tự do trong snapshot)
+        - 1 candidate → return luôn (không tốn vision)
+        - >1 candidate + image_hint → vision disambiguate (chỉ trong list)
+        - >1 candidate không image_hint → respect target.nth (backward compat)
+
+        Cap per-session — vượt cap → trả None.
         """
-        ref = find_ref(snapshot, target)
-        if ref is not None:
-            return ref
-
+        candidates = find_refs(snapshot, target)
         image_hint = getattr(target, "image_hint", None)
+
+        # Case: 1 match — return luôn
+        if len(candidates) == 1:
+            return candidates[0]
+
+        # Case: >1 match
+        if len(candidates) > 1:
+            if not image_hint:
+                # Backward compat: respect nth (default 0 = first)
+                idx = target.nth if 0 <= target.nth < len(candidates) else 0
+                if len(candidates) > 1:
+                    _log.info(
+                        "find_ref_with_vision: %d candidates, no image_hint "
+                        "→ pick nth=%d (%s)",
+                        len(candidates), idx, candidates[idx],
+                    )
+                return candidates[idx]
+            # Có image_hint → vision disambiguate (chỉ chọn trong list)
+            return self._vision_call(
+                snapshot, image_hint, target, candidate_refs=candidates,
+            )
+
+        # Case: 0 match
         if not image_hint:
             return None
+        # Vision fallback (tìm tự do trong snapshot)
+        return self._vision_call(snapshot, image_hint, target, candidate_refs=None)
 
+    def _vision_call(
+        self,
+        snapshot: str,
+        image_hint: str,
+        target: TargetSpec,
+        candidate_refs: Optional[list[str]],
+    ) -> Optional[str]:
+        """Wrapper gọi vision matcher với cap + screenshot capture.
+
+        candidate_refs:
+        - None → vision fallback mode (text fail hoàn toàn)
+        - list[str] → vision disambiguate mode (text match >1)
+        """
         if self.vision_calls_used >= self.vision_calls_cap:
             _log.warning(
                 "vision_matcher: session=%s exceeded cap %d — skip",
@@ -136,17 +176,11 @@ class FlowRuntime:
             return None
 
         if not self.api_key:
-            _log.warning(
-                "vision_matcher: api_key trống — skip vision fallback"
-            )
+            _log.warning("vision_matcher: api_key trống — skip")
             return None
 
-        # Take fresh screenshot for vision matcher (run_dir is required —
-        # if no run_dir, skip vision because we have nowhere to save).
         if self.run_dir is None:
-            _log.warning(
-                "vision_matcher: no run_dir — skip"
-            )
+            _log.warning("vision_matcher: no run_dir — skip")
             return None
 
         screenshot_path = ""
@@ -171,7 +205,6 @@ class FlowRuntime:
         if not screenshot_path:
             return None
 
-        # Lazy import — vision_matcher pulls in OpenAI SDK
         from services.vision_matcher import find_ref_by_image
 
         ref = find_ref_by_image(
@@ -180,15 +213,17 @@ class FlowRuntime:
             hint_image_url=image_hint,
             snapshot_text=snapshot,
             description=getattr(target, "image_hint_desc", "") or "",
+            candidate_refs=candidate_refs,
         )
 
-        # Increment counter sau khi gọi (kể cả fail) để cap đúng cost
         self.vision_calls_used += 1
         self.vision_matches.append({
             "step_index": self.step_count,
             "hint_url": image_hint,
             "ref_returned": ref,
             "screenshot_path": screenshot_path,
+            "mode": "disambiguate" if candidate_refs else "fallback",
+            "candidates": candidate_refs or [],
         })
         return ref
 
@@ -319,10 +354,6 @@ def _make_record(
         action_payload["downloaded_filename"] = result.downloaded_filename
     if result.downloaded_cdn_url:
         action_payload["downloaded_cdn_url"] = result.downloaded_cdn_url
-    # target_label — text/label readable của element vừa tác động (chỉ set
-    # bởi click/fill/open_link). UI hiển thị "đã click <X>" cho Sup Agent.
-    if result.target_label:
-        action_payload["target_label"] = result.target_label
     return StepRecord(
         step=step_num,
         goal=goal,
@@ -403,8 +434,8 @@ def run_flow(
     `api_key` cần thiết cho vision matcher fallback (TargetSpec.image_hint).
     Truyền rỗng → vision fallback bị skip (text-only matching).
 
-    `output_holder` cho phép caller thu data từ action `extract_data`.
-    Truyền 1 dict — runtime ghi vào `output_holder["data"]`.
+    `output_holder` cho phép caller (worker job_handler) thu data từ action
+    `extract_data`. Truyền 1 dict — runtime ghi vào `output_holder["data"]`.
     """
     rt = FlowRuntime(
         browser=browser or browser_module,
