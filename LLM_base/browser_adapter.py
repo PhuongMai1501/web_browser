@@ -178,6 +178,20 @@ def _build_subprocess_env() -> dict:
             "AppleWebKit/537.36 (KHTML, like Gecko) "
             "Chrome/124.0.0.0 Safari/537.36"
         )
+
+    # Chromium launch args — làm browser giống Chrome desktop thật hết mức.
+    # Nginx FPT có thể inspect navigator.webdriver, AutomationControlled flag,
+    # accept-language, ... → fallback 404 cho automation. Disable các flag này
+    # để hành xử giống Chrome user mở bằng tay.
+    if not env.get("AGENT_BROWSER_ARGS"):
+        env["AGENT_BROWSER_ARGS"] = "\n".join([
+            "--disable-blink-features=AutomationControlled",
+            "--no-default-browser-check",
+            "--no-first-run",
+            "--disable-features=IsolateOrigins,site-per-process",
+            "--lang=vi-VN",
+            "--accept-lang=vi-VN,vi;q=0.9,en;q=0.8",
+        ])
     return env
 
 
