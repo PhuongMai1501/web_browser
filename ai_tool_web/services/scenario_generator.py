@@ -293,6 +293,100 @@ VÍ DỤ SAI 2 — secret có default (validator reject hard error):
 Khi user KHÔNG ghi value inline (vd "đăng nhập gmail"):
 - Declare inputs bình thường KHÔNG default cho cả string + secret.
 
+⚠️ MICROSOFT AZURE SSO FLOW (RẤT QUAN TRỌNG):
+
+Khi user yêu cầu đăng nhập qua **chang.fpt.net**, **Office 365**, **SharePoint**,
+**Teams**, hoặc bất kỳ site nào dùng nút **"Đăng nhập Microsoft Azure"** /
+**"Sign in with Microsoft"** → flow SẼ REDIRECT tới **login.microsoftonline.com**
+(trang Microsoft Sign in TIẾNG ANH). LLM PHẢI gen selector tiếng Anh cho các
+bước sau redirect, KHÔNG dùng label tiếng Việt — vì trang Microsoft KHÔNG có
+label tiếng Việt như "Tên đăng nhập" hay "Mật khẩu".
+
+Flow chuẩn cho chang.fpt.net Microsoft Azure SSO:
+
+```yaml
+allowed_domains:
+  - chang.fpt.net
+  - login.microsoftonline.com   # ← BẮT BUỘC có để Chrome navigate được sang
+  - microsoft.com               # (optional, redirect chain MS)
+  - microsoftonline.com         # (optional)
+
+steps:
+  - action: click
+    target: { role: button, text_any: ["Khởi hành"] }
+    note: "Nút entry trên chang.fpt.net home"
+
+  - action: click
+    target: { role: button, text_any: ["Đăng nhập Microsoft Azure", "Microsoft"] }
+    note: "Trigger redirect sang Microsoft SSO"
+
+  # ── Sau bước này đã ở https://login.microsoftonline.com (tiếng Anh) ──
+
+  - action: wait_for
+    target: { role: heading, text_any: ["Sign in"] }
+    timeout_ms: 15000
+    note: "Chờ trang Microsoft Sign in render"
+
+  - action: fill
+    target: { role: textbox, placeholder_any: ["someone@example.com", "Email", "Username"] }
+    value_from: username
+    note: "Email input — placeholder Microsoft chuẩn"
+
+  - action: click
+    target: { role: button, text_any: ["Next"] }
+    note: "Microsoft dùng Next, KHÔNG dùng 'Tiếp tục'"
+
+  - action: wait_for
+    target: { role: heading, text_any: ["Enter password", "Password"] }
+    timeout_ms: 15000
+    note: "Chờ trang password render"
+
+  - action: fill
+    target: { role: textbox, label_any: ["Password", "Enter password"] }
+    value_from: password
+    note: "Password input"
+
+  - action: click
+    target: { role: button, text_any: ["Sign in"] }
+    note: "Microsoft dùng Sign in, KHÔNG dùng 'Đăng nhập'"
+
+  # MFA: nếu app yêu cầu authenticator, dùng ask_user (xem pattern login chung)
+
+  - action: if_visible
+    target: { role: button, text_any: ["Yes"] }
+    note: "Stay signed in? popup — click Yes để giữ session"
+    then:
+      - action: click
+        target: { role: button, text_any: ["Yes"] }
+    else: []
+```
+
+VÍ DỤ SAI (gen sai cho Microsoft SSO):
+```yaml
+- action: fill
+  target: { role: textbox, text_any: ["Tên đăng nhập"] }    # ❌ Microsoft KHÔNG có label này
+- action: click
+  target: { role: button, text_any: ["Đăng nhập"] }         # ❌ MS dùng "Sign in" tiếng Anh
+```
+
+CHEAT SHEET selector Microsoft Sign in pages:
+
+| Trang                    | Field/Button     | Selector                                                |
+|--------------------------|------------------|--------------------------------------------------------|
+| Sign in (email)          | Email input      | `role: textbox, placeholder_any: ["someone@example.com"]` |
+| Sign in (email)          | Next button      | `role: button, text_any: ["Next"]`                     |
+| Enter password           | Password input   | `role: textbox, label_any: ["Password", "Enter password"]` |
+| Enter password           | Sign in button   | `role: button, text_any: ["Sign in"]`                  |
+| Approve sign-in request  | (MFA — ask_user) | Hỏi user xác thực qua app                              |
+| Stay signed in?          | Yes button       | `role: button, text_any: ["Yes"]`                      |
+| Stay signed in?          | No button        | `role: button, text_any: ["No"]`                       |
+
+LƯU Ý: chang.fpt.net dashboard sau khi login thành công có dấu hiệu:
+- URL chứa `/dashboard`
+- Element text "Hi! anh" / "Hi anh" / "Bạn muốn biết điều gì?"
+- Link "Chang Biết Tuốt" / "Trợ lý của tôi"
+→ Dùng làm success marker trong action `wait_for` sau khi click Yes.
+
 OUTPUT JSON ĐỘNG (output_schema + action extract_data):
 
 Khi user yêu cầu output có FORMAT cụ thể (vd "trả về JSON với tên, giá, web bán"),
