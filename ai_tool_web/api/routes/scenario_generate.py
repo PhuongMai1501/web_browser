@@ -19,6 +19,7 @@ from typing import Optional
 from fastapi import APIRouter
 from pydantic import BaseModel
 
+from services.builtin_matcher import match_builtin, load_builtin_yaml
 from services.scenario_generator import generate_yaml
 from services.yaml_normalizer import normalize_yaml
 
@@ -59,14 +60,31 @@ class ScenarioGenerateResponse(BaseModel):
 
 @router.post("/generate", response_model=ScenarioGenerateResponse)
 async def generate_scenario(req: ScenarioGenerateRequest):
-    """Sinh YAML scenario từ NL description (LLM-assisted).
+    """Sinh YAML scenario từ NL description.
 
     Pipeline:
-      1. Gọi OpenAI gpt-4o-mini với system prompt + few-shot QCVN
+      0. (FAST PATH) Match keyword → builtin scenario → trả YAML, 0 LLM token
+      1. (FALLBACK) Gọi OpenAI gpt-4o-mini với system prompt + few-shot QCVN
       2. Strip markdown wrap nếu có
       3. Validate qua yaml_normalizer (parse + Pydantic ScenarioSpec)
       4. Trả YAML hợp lệ HOẶC errors + yaml_raw để Sup Agent debug
     """
+    # Fast path: match builtin scenario qua keyword detection
+    matched_id = match_builtin(req.description)
+    if matched_id:
+        builtin_yaml = load_builtin_yaml(matched_id)
+        if builtin_yaml:
+            norm_bi = normalize_yaml(builtin_yaml)
+            if norm_bi.parse_ok and norm_bi.validation_ok:
+                return ScenarioGenerateResponse(
+                    ok=True,
+                    yaml=builtin_yaml,
+                    scenario_id_suggestion=matched_id,
+                    model_used="builtin-match",
+                    tokens_in=0,
+                    tokens_out=0,
+                )
+
     gen = generate_yaml(
         description=req.description,
         site_hint=req.site_hint,
