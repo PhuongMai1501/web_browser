@@ -232,26 +232,25 @@ INPUTS RULES:
 - Nếu type=secret → tool-web tự mask trong log.
 - Có thể đặt `default: <value>` để bypass require khi missing context (chỉ test mode).
 
-⚠️ EXTRACT CREDENTIALS TỪ QUERY — RẤT QUAN TRỌNG:
+⚠️ EXTRACT VALUES INLINE TỪ QUERY — RẤT QUAN TRỌNG:
 
-Khi user trong NL description ĐÃ ghi sẵn credentials/giá trị inline (email, tên
-đăng nhập, mật khẩu, OTP, keyword, mã sản phẩm, ...), PHẢI extract giá trị đó
-và đặt vào field `default` của input tương ứng. KHÔNG để input thiếu default rồi
-yêu cầu user nhập lại — đó là regression UX.
+Khi user trong NL description ĐÃ ghi sẵn giá trị inline (email, tên đăng nhập,
+keyword, mã sản phẩm, URL, ...), extract giá trị đó vào `default` của input
+TƯƠNG ỨNG — TRỪ password/secret (validator backend chặn default cho secret
+field vì lý do bảo mật).
 
 Patterns nhận diện trong query (tiếng Việt + Anh, case-insensitive):
-- Email/username: `email: X`, `tên đăng nhập: X`, `tên đăng nhập là X`,
-  `username: X`, `user: X`, `tài khoản: X`, `account: X`, `login: X`
-- Password: `mật khẩu: X`, `mật khẩu là X`, `password: X`, `pass: X`, `pwd: X`
-- OTP / token / mã: `OTP: X`, `mã xác thực: X`, `code: X`, `token: X`
-- Keyword search: `tìm kiếm "X"`, `search "X"`, `từ khoá: X`, `keyword: X`
-- URL/link cụ thể: `link: X`, `URL: X`, `truy cập <full-url>`
+- Email/username: `email: X`, `tên đăng nhập: X`, `username: X`, `tài khoản: X`
+- Keyword search: `tìm kiếm "X"`, `từ khoá: X`, `keyword: X`
+- URL cụ thể: `link: X`, `URL: X`, `truy cập <full-url>`
+- Mã/ID/SKU: `mã: X`, `sản phẩm X`, `số hiệu X`
 
 Quy tắc gen:
-1. Extract giá trị (strip dấu `:` `.` `,` ở cuối, giữ nguyên format gốc).
-2. Khai báo `inputs` cho mỗi credential extract được.
-3. Set `default: "<giá trị>"` cho input đó.
-4. `required: true` vẫn giữ (cho phép user override sau qua context).
+1. Extract giá trị (strip `:` `.` `,` cuối, giữ format gốc).
+2. Field type=string → set `default: "<giá trị>"`.
+3. Field type=secret (password/pwd/token) → KHÔNG default (validator reject),
+   vẫn declare `required: true source: context`, worker sẽ ask_user runtime.
+4. `required: true` cho field cần thiết để chạy.
 
 VÍ DỤ ĐÚNG:
 
@@ -265,35 +264,34 @@ inputs:
     type: string
     required: true
     source: context
-    default: "loanntt29@fpt.com"        # ← extract từ query
+    default: "loanntt29@fpt.com"        # ← extract từ query (string OK)
     description: "Tên đăng nhập Chang"
   - name: password
-    type: secret
+    type: secret                         # ← secret KHÔNG có default
     required: true
     source: context
-    default: "Chjhongbietjdau9."        # ← extract từ query
     description: "Mật khẩu Chang"
-steps:
-  - action: fill
-    target: { role: textbox, label_any: ["Tên đăng nhập"] }
-    value_from: username
-  - action: fill
-    target: { role: textbox, label_any: ["Mật khẩu"] }
-    value_from: password
 ```
 
-VÍ DỤ SAI (regression — không extract):
+VÍ DỤ SAI 1 — string không extract default (regression UX):
 ```yaml
-inputs:
-  - name: username
-    type: string
-    required: true
-    source: context
-    description: "Tên đăng nhập"     # ❌ thiếu default → worker phải hỏi lại
+- name: username
+  type: string
+  required: true
+  source: context
+  description: "Tên đăng nhập"    # ❌ query đã có "loanntt29@fpt.com" mà không extract
 ```
 
-Khi user KHÔNG ghi credentials trong query (vd chỉ nói "đăng nhập gmail"):
-- Vẫn khai báo inputs nhưng KHÔNG có default — worker sẽ ask_user runtime.
+VÍ DỤ SAI 2 — secret có default (validator reject hard error):
+```yaml
+- name: password
+  type: secret
+  required: true
+  default: "Chjhongbietjdau9."    # ❌ secret default FAIL: 422 "default phải rỗng"
+```
+
+Khi user KHÔNG ghi value inline (vd "đăng nhập gmail"):
+- Declare inputs bình thường KHÔNG default cho cả string + secret.
 
 OUTPUT JSON ĐỘNG (output_schema + action extract_data):
 
