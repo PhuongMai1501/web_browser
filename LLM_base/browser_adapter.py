@@ -168,6 +168,16 @@ def _build_subprocess_env() -> dict:
         env["AGENT_BROWSER_PROXY"] = http_proxy
     if not env.get("AGENT_BROWSER_PROXY_BYPASS") and merged:
         env["AGENT_BROWSER_PROXY_BYPASS"] = merged
+
+    # Set Chrome desktop User-Agent — một số server FPT nội bộ route khác
+    # dựa trên UA. Default Chromium UA có thể bị nhận diện là bot/headless.
+    # Override bằng UA Chrome stable Windows desktop nếu chưa khai báo.
+    if not env.get("AGENT_BROWSER_USER_AGENT"):
+        env["AGENT_BROWSER_USER_AGENT"] = (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36"
+        )
     return env
 
 
