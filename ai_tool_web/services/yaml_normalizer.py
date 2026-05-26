@@ -127,8 +127,10 @@ def _check_goal(spec: ScenarioSpec) -> list[ValidationError_]:
 
 def _check_credentials(spec: ScenarioSpec) -> tuple[list, list]:
     """§3.5 credential protection.
-    - password/secret field: default PHẢI rỗng → hard error
-    - field khác: default match secret pattern → warning
+
+    Thay đổi 2026-05-26: secret default = WARNING (không reject) — cho phép
+    user paste credentials inline trong YAML test/ad-hoc. Trách nhiệm user
+    đảm bảo KHÔNG commit YAML này vào public repo / share rộng.
     """
     errors, warnings = [], []
     for i, inp in enumerate(spec.inputs):
@@ -138,10 +140,12 @@ def _check_credentials(spec: ScenarioSpec) -> tuple[list, list]:
         default = inp.default
 
         if is_secret and default not in (None, ""):
-            errors.append(ValidationError_(
+            warnings.append(ValidationError_(
                 field=f"inputs.{i}.default",
-                message=f"Field '{inp.name}' là secret/password — "
-                        f"default phải rỗng, không được chứa giá trị.",
+                message=f"Field '{inp.name}' là secret/password có default giá trị "
+                        f"— credential sẽ lưu vào DB scenario revision. "
+                        f"KHÔNG commit YAML này vào public repo.",
+                severity="warning",
             ))
         elif isinstance(default, str):
             for pat in _SECRET_PATTERNS:

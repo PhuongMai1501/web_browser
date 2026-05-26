@@ -248,8 +248,9 @@ Patterns nhận diện trong query (tiếng Việt + Anh, case-insensitive):
 Quy tắc gen:
 1. Extract giá trị (strip `:` `.` `,` cuối, giữ format gốc).
 2. Field type=string → set `default: "<giá trị>"`.
-3. Field type=secret (password/pwd/token) → KHÔNG default (validator reject),
-   vẫn declare `required: true source: context`, worker sẽ ask_user runtime.
+3. Field type=secret (password/pwd/token) → CŨNG set `default: "<giá trị>"`
+   nếu user paste rõ ràng trong query (validator 2026-05-26 cho phép,
+   chỉ warning, không reject). User tự chịu trách nhiệm không share YAML.
 4. `required: true` cho field cần thiết để chạy.
 
 VÍ DỤ ĐÚNG:
@@ -267,27 +268,20 @@ inputs:
     default: "loanntt29@fpt.com"        # ← extract từ query (string OK)
     description: "Tên đăng nhập Chang"
   - name: password
-    type: secret                         # ← secret KHÔNG có default
+    type: secret
     required: true
     source: context
+    default: "Chjhongbietjdau9."        # ← extract password từ query (validator allow + warn)
     description: "Mật khẩu Chang"
 ```
 
-VÍ DỤ SAI 1 — string không extract default (regression UX):
+VÍ DỤ SAI — không extract value inline (regression UX):
 ```yaml
 - name: username
   type: string
   required: true
   source: context
   description: "Tên đăng nhập"    # ❌ query đã có "loanntt29@fpt.com" mà không extract
-```
-
-VÍ DỤ SAI 2 — secret có default (validator reject hard error):
-```yaml
-- name: password
-  type: secret
-  required: true
-  default: "Chjhongbietjdau9."    # ❌ secret default FAIL: 422 "default phải rỗng"
 ```
 
 Khi user KHÔNG ghi value inline (vd "đăng nhập gmail"):
