@@ -88,6 +88,24 @@ async def _next_iteration(redis, task_id: str) -> int:
     return int(iteration)
 
 
+def _looks_like_yaml(text: str) -> bool:
+    """Heuristic: text trông như YAML scenario, không phải NL description.
+
+    Nhận diện user paste YAML vào field query (UI mode nhầm) → server promote
+    sang scenario_yaml để tránh gọi LLM gen YAML từ YAML.
+
+    Pattern: bắt đầu với `id:` (key bắt buộc của scenario) + có ít nhất 1
+    key đặc trưng (steps:/mode:/start_url:/inputs:).
+    """
+    if not text:
+        return False
+    head = text.lstrip()[:200]
+    if not head.lower().startswith("id:"):
+        return False
+    markers = ("\nsteps:", "\nmode:", "\nstart_url:", "\ninputs:")
+    return any(m in text for m in markers)
+
+
 def _convert_missing_required_to_ask(spec, context):
     """Đổi inputs[].source=context required nhưng thiếu trong request context
     sang source=ask_user + prepend ask_user steps để worker hỏi user runtime
@@ -185,24 +203,36 @@ async def create_session(
         q = req.query.strip()
         if not q:
             raise HTTPException(422, detail="'query' không được rỗng.")
-        # generate_yaml gọi OpenAI sync (~3-5s) → off-thread để không block event loop.
-        gen = await asyncio.to_thread(
-            generate_yaml,
-            description=q,
-            site_hint=req.query_site_hint,
-        )
-        gen_model_used = gen.model
-        gen_tokens_in = gen.tokens_in
-        gen_tokens_out = gen.tokens_out
-        if not gen.ok:
-            raise HTTPException(
-                502,
-                detail=f"LLM generate fail: {gen.error}",
+
+        # Heuristic: user paste YAML vào field query (chọn nhầm mode UI).
+        # Tránh gọi LLM gen lại YAML từ YAML — promote sang scenario_yaml.
+        if _looks_like_yaml(q):
+            _log.info(
+                "[task=%s] query field looks like YAML (starts with id:/mode:/steps:) "
+                "→ promote sang scenario_yaml, skip LLM gen",
+                req.task_id or "(auto)",
             )
-        # Inject YAML đã gen vào scenario_yaml flow phía dưới — KHÔNG lưu DB,
-        # chỉ tồn tại trong scenario_config của session này.
-        req.scenario_yaml = gen.yaml
-        generated_from_query = True
+            req.scenario_yaml = q
+            req.query = None
+        else:
+            # generate_yaml gọi OpenAI sync (~3-5s) → off-thread để không block event loop.
+            gen = await asyncio.to_thread(
+                generate_yaml,
+                description=q,
+                site_hint=req.query_site_hint,
+            )
+            gen_model_used = gen.model
+            gen_tokens_in = gen.tokens_in
+            gen_tokens_out = gen.tokens_out
+            if not gen.ok:
+                raise HTTPException(
+                    502,
+                    detail=f"LLM generate fail: {gen.error}",
+                )
+            # Inject YAML đã gen vào scenario_yaml flow phía dưới — KHÔNG lưu DB,
+            # chỉ tồn tại trong scenario_config của session này.
+            req.scenario_yaml = gen.yaml
+            generated_from_query = True
 
     # Hai mode (sau khi query đã chuyển thành scenario_yaml):
     #  - YAML inline: req.scenario_yaml set → parse ad-hoc spec, không cần DB lookup
