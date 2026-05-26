@@ -169,27 +169,11 @@ def _build_subprocess_env() -> dict:
     if not env.get("AGENT_BROWSER_PROXY_BYPASS") and merged:
         env["AGENT_BROWSER_PROXY_BYPASS"] = merged
 
-    # Set Chrome desktop User-Agent — một số server FPT nội bộ route khác
-    # dựa trên UA. Default Chromium UA có thể bị nhận diện là bot/headless.
-    # Override bằng UA Chrome stable Windows desktop nếu chưa khai báo.
-    if not env.get("AGENT_BROWSER_USER_AGENT"):
-        env["AGENT_BROWSER_USER_AGENT"] = (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/124.0.0.0 Safari/537.36"
-        )
-
-    # Chromium launch args — chỉ giữ flag SAFE với headless mode.
-    # Lưu ý 2026-05-26: thử thêm `--disable-features=IsolateOrigins,
-    # site-per-process` gây Chrome crash exit 13 "Multiple targets are
-    # not supported in headless mode" → đã loại bỏ. Giữ flag an toàn để
-    # browser fingerprint ít giống automation hơn.
-    if not env.get("AGENT_BROWSER_ARGS"):
-        env["AGENT_BROWSER_ARGS"] = "\n".join([
-            "--disable-blink-features=AutomationControlled",
-            "--lang=vi-VN",
-            "--accept-lang=vi-VN,vi;q=0.9,en;q=0.8",
-        ])
+    # NOTE 2026-05-26: thử thêm AGENT_BROWSER_USER_AGENT + AGENT_BROWSER_ARGS
+    # gây Chrome crash exit 13 "Multiple targets are not supported in headless
+    # mode" → REVERT toàn bộ, chỉ giữ proxy config bên trên. Nếu cần fingerprint
+    # giả Chrome desktop, phải làm cẩn thận: agent-browser daemon-based, args
+    # mới không apply runtime, cần test isolated trước khi merge.
     return env
 
 
