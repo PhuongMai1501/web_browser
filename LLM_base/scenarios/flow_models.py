@@ -141,6 +141,10 @@ class FlowStep(BaseModel):
     extensions: Optional[list[str]] = None  # [".doc", ".pdf"] — filter file mới
     remote_dir: Optional[str] = None        # subdir trên CDN bucket
 
+    # upload_html_source — capture HTML source trang hiện tại
+    format: Optional[str] = None      # "outer_html" (default) | "inner_html"
+    filename: Optional[str] = None    # tên file .html; auto-gen nếu None
+
     # condition branching (if_visible)
     then: list["FlowStep"] = Field(default_factory=list)
     else_: list["FlowStep"] = Field(default_factory=list, alias="else")

@@ -63,6 +63,39 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _collect_downloaded_files(events: list[dict]) -> list[dict]:
+    """Scan collected events, trả về list file đã upload CDN (upload_download
+    + upload_html_source).
+
+    Mỗi entry:
+        {
+            "filename": "<basename>",
+            "cdn_url":  "<CDN URL>",
+            "action":   "upload_download" | "upload_html_source",
+            "step":     <step number>,
+            "url_at_capture": "<URL trang lúc upload>",
+        }
+
+    Thứ tự giữ nguyên theo step order.
+    """
+    out: list[dict] = []
+    for ev in events:
+        if ev.get("type") != "step":
+            continue
+        p = ev.get("payload") or {}
+        cdn_url = p.get("downloaded_cdn_url") or ""
+        if not cdn_url:
+            continue
+        out.append({
+            "filename":       p.get("downloaded_filename") or "",
+            "cdn_url":        cdn_url,
+            "action":         p.get("action") or "",
+            "step":           p.get("step") or 0,
+            "url_at_capture": p.get("url_after") or p.get("url_before") or "",
+        })
+    return out
+
+
 def friendly_error(e: Exception) -> tuple[str, str]:
     if isinstance(e, RateLimitError):
         return "RATE_LIMIT", "OpenAI API rate limit. Vui lòng thử lại sau vài phút."
@@ -264,6 +297,11 @@ def run_job_sync(
             # extracted_data = data từ action `extract_data` (nếu spec có
             # `output_schema` + step extract_data). Persist lưu vào result.json.
             extracted_data = output_holder.get("data") if output_holder else None
+            # downloaded_files = scan tất cả step records có downloaded_cdn_url
+            # (action upload_download, upload_html_source). Merge vào
+            # result.artifacts.downloaded_files[] để Sup Agent đọc CDN URL từ
+            # /result endpoint compact (không phải fetch session.jsonl).
+            downloaded_files = _collect_downloaded_files(_collected_events)
             result_path, result_cdn_url = write_result_json(
                 session_id=session_id,
                 status=status,
@@ -279,6 +317,7 @@ def run_job_sync(
                 extracted_data=extracted_data,
                 session_json_url=session_json_url,
                 task_id=task_id,
+                downloaded_files=downloaded_files,
             )
             # Lưu CDN URL vào Redis để API pod fetch (K8s: API ≠ Worker FS).
             # Fallback empty string nếu uploader=None hoặc upload fail.

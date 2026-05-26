@@ -52,6 +52,7 @@ def write_result_json(
     extracted_data: dict | None = None,
     session_json_url: str = "",
     task_id: str = "",
+    downloaded_files: list[dict] | None = None,
 ) -> tuple[Path, str]:
     """
     Ghi result.json tổng kết session.
@@ -100,6 +101,10 @@ def write_result_json(
             "session_json_url": session_json_url,
         },
     }
+    # List file đã upload CDN (action upload_download / upload_html_source).
+    # Sup Agent đọc trực tiếp từ result endpoint, không phải fetch session.jsonl.
+    if downloaded_files:
+        result["artifacts"]["downloaded_files"] = downloaded_files
     if error_msg:
         result["error_msg"] = error_msg
     if extracted_data:

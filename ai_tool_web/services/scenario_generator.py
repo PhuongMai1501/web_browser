@@ -131,6 +131,15 @@ CÁC ACTION HỢP LỆ:
 - ask_user: hỏi user runtime. Cần `field: <input_name>` + `prompt: <câu hỏi>`. Worker phát SSE event ask, đợi user POST /resume.
 - eval_js: chạy JS script. Cần `script: <code>`. Workaround cho inline onclick handler.
 - upload_download: poll file download xong, upload lên CDN, xóa local. Optional `extensions: [...]`, `timeout_ms`.
+- upload_html_source: lấy MÃ NGUỒN HTML trang hiện tại upload lên CDN.
+  Optional `format` ("outer_html" default | "inner_html"), `filename` (auto-gen nếu thiếu),
+  `timeout_ms` (override smart wait, default 20000ms).
+  Result CDN URL ở `result.artifacts.downloaded_files[].cdn_url`.
+  Dùng khi user yêu cầu: "lấy mã nguồn HTML", "tải source code trang web",
+  "scrape full HTML page", "lưu trang về file .html", "download HTML",
+  "lấy raw HTML", "capture page source", "truy cập X.com và lấy source".
+  ⚠️ Action TỰ ĐỘNG đợi document.readyState === complete + buffer 1.5s.
+  KHÔNG cần `wait_for` step trước — chỉ gen DUY NHẤT 1 step upload_html_source.
 - extract_data: LLM extract data từ DOM theo top-level `output_schema`. Cần đặt CUỐI flow. Optional `prompt: <instruction>`.
 
 ROLE HỢP LỆ TRONG target:
@@ -328,6 +337,42 @@ COMMON PATTERNS:
    - wait_for menu variant render
    - eval_js find link by text rồi .click() (CDP click không trigger inline onclick)
    - upload_download cuối flow để collect file
+
+5. Capture HTML source (KHÁC download — không click "Tải về" mà lấy raw HTML):
+   - goto start_url (auto, không cần action)
+   - upload_html_source DUY NHẤT 1 step ở cuối flow
+
+   ⚠️ KHÔNG gen `wait_for` trước `upload_html_source`. Action này đã BUILT-IN
+   smart wait — tự poll `document.readyState === complete` (max 20s) + buffer
+   1.5s cho SPA mount. Thêm `wait_for` với selector đoán mò = bug nguy hiểm:
+   nếu selector không tồn tại trên site đó → wait_for timeout 30s → flow FAIL
+   trước khi tới upload_html_source. Đã có incident: gen wait_for "Tìm kiếm"
+   cho thuvienphapluat rồi áp dụng nhầm cho chang.fpt.net → fail toàn flow.
+
+   VÍ DỤ ĐÚNG cho query "lấy mã nguồn HTML trang vnexpress" / "truy cập
+   example.com và lấy source HTML" — generic, không cần biết DOM site:
+     ```yaml
+     id: get_vnexpress_html
+     mode: flow
+     start_url: https://vnexpress.net
+     allowed_domains: [vnexpress.net]
+     max_steps_default: 3
+     steps:
+       - action: upload_html_source
+         filename: vnexpress_home.html
+         note: Capture HTML toàn trang
+     ```
+
+   Override timeout nếu trang đặc biệt chậm:
+     ```yaml
+     steps:
+       - action: upload_html_source
+         filename: slow_site.html
+         timeout_ms: 35000   # override smart wait, default 20000
+     ```
+
+   KHÔNG dùng extract_data khi user CHỈ muốn HTML raw (không cần parse field).
+   Result CDN URL của file HTML ở `result.artifacts.downloaded_files[].cdn_url`.
 
 NHIỆM VỤ:
 Đọc mô tả tiếng Việt của user, sinh YAML scenario hoàn chỉnh tuân thủ schema trên.
