@@ -179,16 +179,14 @@ def _build_subprocess_env() -> dict:
             "Chrome/124.0.0.0 Safari/537.36"
         )
 
-    # Chromium launch args — làm browser giống Chrome desktop thật hết mức.
-    # Nginx FPT có thể inspect navigator.webdriver, AutomationControlled flag,
-    # accept-language, ... → fallback 404 cho automation. Disable các flag này
-    # để hành xử giống Chrome user mở bằng tay.
+    # Chromium launch args — chỉ giữ flag SAFE với headless mode.
+    # Lưu ý 2026-05-26: thử thêm `--disable-features=IsolateOrigins,
+    # site-per-process` gây Chrome crash exit 13 "Multiple targets are
+    # not supported in headless mode" → đã loại bỏ. Giữ flag an toàn để
+    # browser fingerprint ít giống automation hơn.
     if not env.get("AGENT_BROWSER_ARGS"):
         env["AGENT_BROWSER_ARGS"] = "\n".join([
             "--disable-blink-features=AutomationControlled",
-            "--no-default-browser-check",
-            "--no-first-run",
-            "--disable-features=IsolateOrigins,site-per-process",
             "--lang=vi-VN",
             "--accept-lang=vi-VN,vi;q=0.9,en;q=0.8",
         ])
