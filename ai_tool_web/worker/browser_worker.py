@@ -33,6 +33,40 @@ from worker import heartbeat, job_handler
 
 import logging.handlers as _lh
 
+# ── Proxy bypass — chỉ giữ internal host ──────────────────────────
+# Đã verify 2026-05-26 từ trong pod: curl http://login.fpt.net QUA
+# DSC proxy 1.53.141.232:8080 → 200 OK; bypass direct → TCP hang vì
+# pod không có direct egress tới FPT internal subnet (172.20.x.x).
+#
+# Vì vậy: KHÔNG bypass external domain (login.fpt.net, .fpt.net,
+# api.openai.com, cdn.fstats.ai) — để chúng đi qua proxy. Chỉ bypass
+# internal: Redis, localhost, upload.dsc.net, chang.dscapp.com.
+#
+# Forward HTTP_PROXY cho Chromium: xem _build_subprocess_env() trong
+# browser_adapter.py (set AGENT_BROWSER_PROXY).
+_DEFAULT_NO_PROXY = (
+    "172.28.8.105,"          # Redis internal
+    "upload.dsc.net,"         # DSC upload
+    "chang.dscapp.com,"       # internal app
+    "localhost,127.0.0.1"
+)
+
+
+def _ensure_no_proxy() -> None:
+    """Merge bypass mặc định với NO_PROXY từ K8s env (nếu đã set)."""
+    existing = os.environ.get("NO_PROXY") or os.environ.get("no_proxy") or ""
+    parts = {
+        p.strip()
+        for p in (existing + "," + _DEFAULT_NO_PROXY).split(",")
+        if p.strip()
+    }
+    merged = ",".join(sorted(parts))
+    os.environ["NO_PROXY"] = merged
+    os.environ["no_proxy"] = merged
+
+
+_ensure_no_proxy()
+
 _LOG_FORMAT = '{"time":"%(asctime)s","level":"%(levelname)s","worker":"%(name)s","msg":"%(message)s"}'
 
 def _setup_logging() -> None:

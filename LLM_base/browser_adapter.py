@@ -113,6 +113,64 @@ def _validate_url_domain(url: str) -> None:
         raise ValueError(f"URL không hợp lệ: '{url}'") from exc
 
 
+# ── Proxy config cho agent-browser subprocess ─────────────────────
+# Pod K8s đã có HTTP_PROXY=http://1.53.141.232:8080 do DevOps set ở
+# Deployment. Curl trong pod đi qua proxy này ĐẾN ĐƯỢC login.fpt.net.
+# Nhưng agent-browser native binary KHÔNG tự đọc HTTP_PROXY → phải
+# forward qua biến AGENT_BROWSER_PROXY (theo README package, version
+# 0.27+: cờ --proxy hoặc env AGENT_BROWSER_PROXY).
+#
+# NO_PROXY chỉ giữ internal host (Redis pod, localhost...) — KHÔNG
+# bypass external domain như login.fpt.net vì pod K8s không có direct
+# egress tới FPT internal subnet (172.20.x.x) → bypass = hang/timeout.
+# Đã verify 2026-05-26: curl direct tới 172.20.18.32 hang vô tận.
+_DEFAULT_NO_PROXY_DOMAINS = (
+    "172.28.8.105,"          # Redis internal
+    "upload.dsc.net,"         # DSC upload (đã có ở pod no_proxy)
+    "chang.dscapp.com,"       # internal app
+    "localhost,127.0.0.1"
+)
+
+
+def _build_subprocess_env() -> dict:
+    """Copy os.environ + ép NO_PROXY internal + forward HTTP_PROXY cho
+    Chromium qua AGENT_BROWSER_PROXY / AGENT_BROWSER_PROXY_BYPASS.
+
+    Lý do: agent-browser native binary (Rust ELF, stripped) không tự
+    đọc HTTP_PROXY env như curl. Phải dùng cờ --proxy / env riêng để
+    Chromium spawn với proxy đúng — không thì navigate tới host nằm
+    sau proxy sẽ ERR_CONNECTION_TIMED_OUT.
+    """
+    env = os.environ.copy()
+
+    # NO_PROXY (uppercase + lowercase) cho Python requests + curl path
+    existing = env.get("NO_PROXY") or env.get("no_proxy") or ""
+    parts = {
+        p.strip()
+        for p in (existing + "," + _DEFAULT_NO_PROXY_DOMAINS).split(",")
+        if p.strip()
+    }
+    merged = ",".join(sorted(parts))
+    env["NO_PROXY"] = merged
+    env["no_proxy"] = merged
+
+    # Forward HTTP_PROXY xuống Chromium qua AGENT_BROWSER_PROXY env
+    # (CLI flag tương đương: --proxy <url>). Chỉ set nếu chưa được
+    # khai báo explicit ở Deployment.
+    http_proxy = (
+        env.get("HTTPS_PROXY")
+        or env.get("https_proxy")
+        or env.get("HTTP_PROXY")
+        or env.get("http_proxy")
+        or ""
+    )
+    if http_proxy and not env.get("AGENT_BROWSER_PROXY"):
+        env["AGENT_BROWSER_PROXY"] = http_proxy
+    if not env.get("AGENT_BROWSER_PROXY_BYPASS") and merged:
+        env["AGENT_BROWSER_PROXY_BYPASS"] = merged
+    return env
+
+
 def _run(args: list[str], timeout: int = _BROWSER_TIMEOUT_S) -> str:
     """Chạy lệnh agent-browser và trả về stdout.
     Dùng shell=False với list args để tránh shell injection.
@@ -132,6 +190,7 @@ def _run(args: list[str], timeout: int = _BROWSER_TIMEOUT_S) -> str:
             encoding="utf-8",
             timeout=timeout,
             shell=False,
+            env=_build_subprocess_env(),
         )
     except Exception as exc:
         duration_ms = int((time.monotonic() - started) * 1000)
