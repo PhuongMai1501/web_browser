@@ -232,6 +232,69 @@ INPUTS RULES:
 - Nếu type=secret → tool-web tự mask trong log.
 - Có thể đặt `default: <value>` để bypass require khi missing context (chỉ test mode).
 
+⚠️ EXTRACT CREDENTIALS TỪ QUERY — RẤT QUAN TRỌNG:
+
+Khi user trong NL description ĐÃ ghi sẵn credentials/giá trị inline (email, tên
+đăng nhập, mật khẩu, OTP, keyword, mã sản phẩm, ...), PHẢI extract giá trị đó
+và đặt vào field `default` của input tương ứng. KHÔNG để input thiếu default rồi
+yêu cầu user nhập lại — đó là regression UX.
+
+Patterns nhận diện trong query (tiếng Việt + Anh, case-insensitive):
+- Email/username: `email: X`, `tên đăng nhập: X`, `tên đăng nhập là X`,
+  `username: X`, `user: X`, `tài khoản: X`, `account: X`, `login: X`
+- Password: `mật khẩu: X`, `mật khẩu là X`, `password: X`, `pass: X`, `pwd: X`
+- OTP / token / mã: `OTP: X`, `mã xác thực: X`, `code: X`, `token: X`
+- Keyword search: `tìm kiếm "X"`, `search "X"`, `từ khoá: X`, `keyword: X`
+- URL/link cụ thể: `link: X`, `URL: X`, `truy cập <full-url>`
+
+Quy tắc gen:
+1. Extract giá trị (strip dấu `:` `.` `,` ở cuối, giữ nguyên format gốc).
+2. Khai báo `inputs` cho mỗi credential extract được.
+3. Set `default: "<giá trị>"` cho input đó.
+4. `required: true` vẫn giữ (cho phép user override sau qua context).
+
+VÍ DỤ ĐÚNG:
+
+Query: "Truy cập chang.fpt.net. Nhập tên đăng nhập: loanntt29@fpt.com và
+mật khẩu: Chjhongbietjdau9. Bấm Signin."
+
+YAML gen:
+```yaml
+inputs:
+  - name: username
+    type: string
+    required: true
+    source: context
+    default: "loanntt29@fpt.com"        # ← extract từ query
+    description: "Tên đăng nhập Chang"
+  - name: password
+    type: secret
+    required: true
+    source: context
+    default: "Chjhongbietjdau9."        # ← extract từ query
+    description: "Mật khẩu Chang"
+steps:
+  - action: fill
+    target: { role: textbox, label_any: ["Tên đăng nhập"] }
+    value_from: username
+  - action: fill
+    target: { role: textbox, label_any: ["Mật khẩu"] }
+    value_from: password
+```
+
+VÍ DỤ SAI (regression — không extract):
+```yaml
+inputs:
+  - name: username
+    type: string
+    required: true
+    source: context
+    description: "Tên đăng nhập"     # ❌ thiếu default → worker phải hỏi lại
+```
+
+Khi user KHÔNG ghi credentials trong query (vd chỉ nói "đăng nhập gmail"):
+- Vẫn khai báo inputs nhưng KHÔNG có default — worker sẽ ask_user runtime.
+
 OUTPUT JSON ĐỘNG (output_schema + action extract_data):
 
 Khi user yêu cầu output có FORMAT cụ thể (vd "trả về JSON với tên, giá, web bán"),
