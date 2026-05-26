@@ -328,9 +328,9 @@ steps:
     note: "Chờ trang Microsoft Sign in render"
 
   - action: fill
-    target: { role: textbox, placeholder_any: ["someone@example.com", "Email", "Username"] }
+    target: { role: textbox, text_any: ["someone@example.com", "Email", "Username"] }
     value_from: username
-    note: "Email input — placeholder Microsoft chuẩn"
+    note: "Email input — agent-browser snapshot render placeholder thành label, dùng text_any"
 
   - action: click
     target: { role: button, text_any: ["Next"] }
@@ -373,7 +373,7 @@ CHEAT SHEET selector Microsoft Sign in pages:
 
 | Trang                    | Field/Button     | Selector                                                |
 |--------------------------|------------------|--------------------------------------------------------|
-| Sign in (email)          | Email input      | `role: textbox, placeholder_any: ["someone@example.com"]` |
+| Sign in (email)          | Email input      | `role: textbox, text_any: ["someone@example.com"]` ⚠️ text_any (KHÔNG placeholder_any — snapshot agent-browser render label)  |
 | Sign in (email)          | Next button      | `role: button, text_any: ["Next"]`                     |
 | Enter password           | Password input   | `role: textbox, label_any: ["Password", "Enter password"]` |
 | Enter password           | Sign in button   | `role: button, text_any: ["Sign in"]`                  |
