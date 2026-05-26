@@ -163,26 +163,29 @@ def _build_request_flow(req, user_id, source, model, tokens_in, tokens_out) -> d
 
 def _convert_missing_required_to_ask(spec, context):
     """Đổi inputs[].source=context required nhưng thiếu trong request context
-    sang source=ask_user + prepend ask_user steps để worker hỏi user runtime
-    qua SSE thay vì reject 422.
+    sang source=ask_user. Inject ask_user step INLINE — TRƯỚC step đầu tiên
+    có `value_from=<name>` — để worker hỏi user đúng thời điểm trong flow
+    (không phải prepend đầu = hỏi ngay trước khi user thấy form).
 
     Returns (new_spec, converted_names). Nếu không có gì đổi → trả về spec gốc.
 
-    Lưu ý: bỏ qua input đã có trong steps là `action: ask_user` (LLM YAML đôi
-    khi đã include sẵn) để không double-ask cùng 1 field.
+    Lưu ý:
+    - Bỏ qua input đã có trong steps là `action: ask_user` (LLM YAML đôi
+      khi đã include sẵn) để không double-ask cùng 1 field.
+    - Handle nested then/else trong if_visible (recursive).
+    - Nếu input missing nhưng KHÔNG có step nào dùng value_from → fallback
+      prepend ở đầu (giữ behavior cũ cho edge case).
     """
     ctx = context or {}
     if not spec.inputs:
         return spec, []
 
-    # Tập field đã có ask_user step → không cần prepend lại
-    existing_ask_fields = {
-        s.field for s in (spec.steps or []) if s.action == "ask_user" and s.field
-    }
+    # Tập field đã có ask_user step (bao gồm nested) → skip
+    existing_ask_fields = _collect_ask_fields(spec.steps or [])
 
     new_inputs = []
     converted: list[str] = []
-    converted_meta: list[tuple[str, str]] = []  # (name, prompt) để build ask_user steps
+    pending_dict: dict[str, str] = {}  # name -> prompt cần insert inline
     for inp in spec.inputs:
         is_missing = (
             inp.source == "context"
@@ -193,24 +196,67 @@ def _convert_missing_required_to_ask(spec, context):
             new_inputs.append(inp.model_copy(update={"source": "ask_user"}))
             converted.append(inp.name)
             if inp.name not in existing_ask_fields:
-                prompt = inp.description or f"Vui lòng nhập {inp.name}"
-                converted_meta.append((inp.name, prompt))
+                pending_dict[inp.name] = inp.description or f"Vui lòng nhập {inp.name}"
         else:
             new_inputs.append(inp)
     if not converted:
         return spec, []
 
-    # Build ask_user steps + prepend vào spec.steps. Dùng FlowStep từ module
-    # scenarios để Pydantic validate kèm các field default.
-    from scenarios.flow_models import FlowStep
+    # Inject ask_user inline trước step value_from=name (recursive nested)
+    new_steps = _inject_ask_inline(list(spec.steps or []), pending_dict)
 
-    ask_steps = [
-        FlowStep(action="ask_user", field=name, prompt=prompt)
-        for name, prompt in converted_meta
-    ]
-    new_steps = ask_steps + list(spec.steps or [])
+    # Fallback: input missing nhưng KHÔNG có step nào dùng value_from →
+    # prepend ở đầu (giữ behavior cũ để worker vẫn hỏi).
+    if pending_dict:
+        from scenarios.flow_models import FlowStep
+        leftover_asks = [
+            FlowStep(action="ask_user", field=n, prompt=p)
+            for n, p in pending_dict.items()
+        ]
+        new_steps = leftover_asks + new_steps
 
     return spec.model_copy(update={"inputs": new_inputs, "steps": new_steps}), converted
+
+
+def _collect_ask_fields(steps) -> set[str]:
+    """Recursive collect tập tên input đã có ask_user step trong flow."""
+    result: set[str] = set()
+    for s in steps:
+        if s.action == "ask_user" and s.field:
+            result.add(s.field)
+        if s.then:
+            result |= _collect_ask_fields(s.then)
+        if s.else_:
+            result |= _collect_ask_fields(s.else_)
+    return result
+
+
+def _inject_ask_inline(steps, pending_dict):
+    """Insert FlowStep(ask_user, field=name) TRƯỚC step đầu tiên có
+    value_from=name. Recursive walk vào then/else nested. Mutate
+    pending_dict — pop khi đã inject.
+    """
+    from scenarios.flow_models import FlowStep
+    result = []
+    for step in steps:
+        # Recurse vào nested first (immutable spec → model_copy)
+        updates = {}
+        if step.then:
+            updates["then"] = _inject_ask_inline(list(step.then), pending_dict)
+        if step.else_:
+            updates["else_"] = _inject_ask_inline(list(step.else_), pending_dict)
+        if updates:
+            step = step.model_copy(update=updates)
+
+        # Insert ask_user RIGHT BEFORE step nếu nó reference missing input
+        vf = getattr(step, "value_from", None)
+        if vf and vf in pending_dict:
+            prompt = pending_dict.pop(vf)
+            ask_step = FlowStep(action="ask_user", field=vf, prompt=prompt)
+            result.append(ask_step)
+
+        result.append(step)
+    return result
 
 
 @router.post("/v1/sessions", response_model=SessionCreatedResponse, status_code=201)
