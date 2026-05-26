@@ -106,6 +106,61 @@ def _looks_like_yaml(text: str) -> bool:
     return any(m in text for m in markers)
 
 
+_SECRET_CTX_PATTERN = __import__("re").compile(
+    r"(password|pwd|secret|token|api[_-]?key)", __import__("re").I
+)
+
+
+def _mask_context_secrets(context: dict | None) -> dict:
+    """Mask secret-shaped keys trong context để log không leak credentials."""
+    if not context:
+        return {}
+    masked: dict = {}
+    for k, v in context.items():
+        if _SECRET_CTX_PATTERN.search(k):
+            masked[k] = "***MASKED***" if v not in (None, "") else v
+        else:
+            masked[k] = v
+    return masked
+
+
+def _build_request_flow(req, user_id, source, model, tokens_in, tokens_out) -> dict:
+    """Build dict audit trail của 1 request từ Sup Agent.
+
+    Worker sẽ ghi thành request_flow.json + upload MinIO. User check sau khi
+    session done để biết Sup Agent đã gửi gì + API quyết định gì.
+    """
+    from datetime import datetime, timezone
+    return {
+        "received_at": datetime.now(timezone.utc).isoformat(),
+        "endpoint": f"POST /v1/tasks/{req.task_id}/run" if req.task_id else "POST /v1/sessions",
+        "user_id": (user_id or "").strip(),
+        "task_id": req.task_id or "",
+        "raw_body": {
+            "scenario": req.scenario,
+            "query": req.query,
+            "query_site_hint": req.query_site_hint,
+            "scenario_yaml_provided": bool(req.scenario_yaml),
+            "scenario_yaml_len": len(req.scenario_yaml or ""),
+            "context": _mask_context_secrets(req.context),
+            "goal": req.goal,
+            "url": req.url,
+            "max_steps": req.max_steps,
+            "name": req.name,
+            "callback_url": req.callback_url,
+            "ask_missing_inputs": req.ask_missing_inputs,
+            "cancel_prev_iterations": req.cancel_prev_iterations,
+        },
+        "decision": {
+            "source": source,  # scenario_yaml_provided | yaml_promoted_from_query | llm_gen | scenario_id_lookup
+            "llm_model": model or None,
+            "llm_tokens_in": tokens_in or None,
+            "llm_tokens_out": tokens_out or None,
+        },
+        "final_scenario_yaml": req.scenario_yaml or None,
+    }
+
+
 def _convert_missing_required_to_ask(spec, context):
     """Đổi inputs[].source=context required nhưng thiếu trong request context
     sang source=ask_user + prepend ask_user steps để worker hỏi user runtime
@@ -190,7 +245,15 @@ async def create_session(
         )
 
     # Track xem YAML đến từ đâu để response trả về đúng metadata cho Sup Agent.
+    # request_source enum:
+    #   "scenario_yaml_provided"     — Sup Agent paste YAML inline (cache)
+    #   "yaml_promoted_from_query"   — user paste YAML vào field query nhầm
+    #   "llm_gen"                    — LLM gen YAML từ NL query
+    #   "scenario_id_lookup"         — dùng scenario_id, lookup DB (không YAML)
     generated_from_query = False
+    request_source: str = "scenario_id_lookup"
+    if req.scenario_yaml:
+        request_source = "scenario_yaml_provided"
     gen_model_used: str = ""
     gen_tokens_in: int = 0
     gen_tokens_out: int = 0
@@ -214,6 +277,7 @@ async def create_session(
             )
             req.scenario_yaml = q
             req.query = None
+            request_source = "yaml_promoted_from_query"
         else:
             # generate_yaml gọi OpenAI sync (~3-5s) → off-thread để không block event loop.
             gen = await asyncio.to_thread(
@@ -233,6 +297,7 @@ async def create_session(
             # chỉ tồn tại trong scenario_config của session này.
             req.scenario_yaml = gen.yaml
             generated_from_query = True
+            request_source = "llm_gen"
 
     # Hai mode (sau khi query đã chuyển thành scenario_yaml):
     #  - YAML inline: req.scenario_yaml set → parse ad-hoc spec, không cần DB lookup
@@ -338,6 +403,12 @@ async def create_session(
         "url": req.url,
         "max_steps": max_steps,
         "spec_snapshot": spec.model_dump(mode="json"),
+        # Audit trail: full flow từ Sup Agent gửi → API decision → final YAML.
+        # Worker sẽ ghi thành request_flow.json + upload MinIO cùng result.json.
+        # Sup Agent / Hiệp dùng để debug sau khi session done.
+        "request_flow": _build_request_flow(req, x_user_id, request_source,
+                                            gen_model_used, gen_tokens_in,
+                                            gen_tokens_out),
     }
 
     # Callback mode: lưu callback config vào scenario_config để worker đọc
@@ -382,10 +453,10 @@ async def create_session(
     )
     q_pos = await job_queue.push_job(redis, session_id)
 
-    # Chỉ trả scenario_yaml trong response khi YAML được sinh từ query — Sup
-    # Agent cần hiển thị cho user xem/sửa. Mode `scenario_yaml` user gửi sẵn
-    # rồi nên không cần echo lại; mode `scenario` (DB) không có YAML.
-    response_yaml = req.scenario_yaml if generated_from_query else None
+    # Trả YAML cho mọi mode có scenario_yaml (paste / promote / gen) — Sup
+    # Agent cần xác nhận YAML THỰC TẾ đang chạy (debug + log).
+    # Mode scenario_id_lookup: không có YAML inline → None.
+    response_yaml = req.scenario_yaml if req.scenario_yaml else None
 
     return SessionCreatedResponse(
         session_id=session_id,
@@ -395,7 +466,7 @@ async def create_session(
         created_at="",   # filled by session_store; return minimal info
         queue_position=q_pos,
         scenario_yaml=response_yaml,
-        scenario_id=req.scenario if generated_from_query else None,
+        scenario_id=req.scenario if response_yaml else None,
         generated_from_query=generated_from_query,
         model_used=gen_model_used or None,
         tokens_in=gen_tokens_in or None,

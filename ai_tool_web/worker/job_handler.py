@@ -110,6 +110,41 @@ def friendly_error(e: Exception) -> tuple[str, str]:
     return "INTERNAL_ERROR", f"Lỗi: {e}"
 
 
+def _write_request_flow(
+    session_id: str,
+    session_dir: Path,
+    uploader,
+    request_flow: dict | None,
+    task_id: str = "",
+) -> str:
+    """Ghi request_flow.json vào session_dir + upload CDN.
+
+    request_flow đến từ scenario_config["request_flow"] đã được API endpoint
+    inject lúc tạo session. Chứa raw body Sup Agent gửi + decision API chọn
+    (scenario_yaml_provided / yaml_promoted / llm_gen / scenario_id_lookup)
+    + LLM tokens.
+
+    Returns: CDN URL nếu upload OK, "" nếu skip/fail.
+    """
+    if not request_flow:
+        return ""
+    try:
+        flow_path = session_dir / "request_flow.json"
+        flow_path.write_text(
+            json.dumps(request_flow, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        if uploader is None:
+            return ""
+        from services.artifact_uploader import build_artifact_remote_path
+        remote = build_artifact_remote_path(session_id, "request_flow.json", task_id=task_id)
+        cdn_url = uploader.upload_artifact(str(flow_path), remote) or ""
+        return cdn_url
+    except Exception as e:
+        _log.warning("[%s] Write/upload request_flow.json fail: %s", session_id, e)
+        return ""
+
+
 def _copy_runner_session_json(
     session_id: str,
     session_dir: Path,
@@ -289,6 +324,13 @@ def run_job_sync(
         try:
             artifact_dir = get_session_artifact_dir(session_id)
             write_session_jsonl(session_id, _collected_events, artifact_dir)
+            # Ghi + upload request_flow.json (audit Sup Agent gọi gì + API
+            # quyết định gì). Đọc từ scenario_config["request_flow"] đã được
+            # API endpoint inject lúc tạo session.
+            request_flow = scenario_config.get("request_flow") if scenario_config else None
+            request_flow_url = _write_request_flow(
+                session_id, artifact_dir, uploader, request_flow, task_id=task_id,
+            )
             # Copy + upload session.json (rich diagnostic) — capture CDN URL
             # để embed vào result.json (Fix A: Sup Agent fetch debug được).
             session_json_url = _copy_runner_session_json(
