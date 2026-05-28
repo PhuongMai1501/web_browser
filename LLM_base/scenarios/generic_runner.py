@@ -47,7 +47,12 @@ def run_scenario(
     mode = getattr(spec, "mode", "agent")
 
     if mode == "flow":
-        # Set allowlist cho scenario (reset ở finally)
+        # Set per-scenario proxy + allowlist (reset ở finally). Proxy phải set
+        # TRƯỚC open_url để Chromium spawn với proxy đúng.
+        proxy_override_set = False
+        if spec.proxy:
+            browser.set_proxy(spec.proxy, spec.proxy_bypass)
+            proxy_override_set = True
         domain_override_set = False
         if spec.allowed_domains:
             browser.set_allowed_domains(spec.allowed_domains)
@@ -76,12 +81,20 @@ def run_scenario(
                     browser.reset_allowed_domains()
                 except Exception:
                     pass
+            if proxy_override_set:
+                try:
+                    browser.reset_proxy()
+                except Exception:
+                    pass
         return
 
     # mode == "agent" (hoặc "hybrid" fallback cho đến khi ship Sprint 3)
-    # Set allowlist TRƯỚC khi open_url — nếu không open_url dùng default
-    # allowlist và chặn domain của scenario này. try/finally đảm bảo reset
-    # kể cả khi generator bị close giữa chừng.
+    # Set per-scenario proxy + allowlist TRƯỚC khi open_url. Cả 2 reset ở
+    # finally kể cả khi generator bị close giữa chừng.
+    agent_proxy_override_set = False
+    if spec.proxy:
+        browser.set_proxy(spec.proxy, spec.proxy_bypass)
+        agent_proxy_override_set = True
     agent_domain_override_set = False
     if spec.allowed_domains:
         browser.set_allowed_domains(spec.allowed_domains)
@@ -165,6 +178,11 @@ def run_scenario(
         if agent_domain_override_set:
             try:
                 browser.reset_allowed_domains()
+            except Exception:
+                pass
+        if agent_proxy_override_set:
+            try:
+                browser.reset_proxy()
             except Exception:
                 pass
 

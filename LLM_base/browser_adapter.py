@@ -132,6 +132,30 @@ _DEFAULT_NO_PROXY_DOMAINS = (
 )
 
 
+# ── Per-scenario proxy override (2026-05-28) ──────────────────────
+# Set bởi generic_runner trước open_url(), reset finally. Worker đơn luồng
+# → không race. `_ACTIVE_PROXY` track proxy của browser ĐANG mở để biết
+# khi nào cần recycle (close --all + open lại) vì proxy là launch-time
+# option của Chromium, không đổi được giữa chừng session.
+_PROXY_OVERRIDE: str | None = None
+_PROXY_BYPASS_OVERRIDE: str | None = None
+_ACTIVE_PROXY: str | None = None
+
+
+def set_proxy(proxy: str | None, bypass: str | None = None) -> None:
+    """Override proxy cho scenario hiện tại. Nhớ reset_proxy() khi xong."""
+    global _PROXY_OVERRIDE, _PROXY_BYPASS_OVERRIDE
+    _PROXY_OVERRIDE = (proxy or "").strip() or None
+    _PROXY_BYPASS_OVERRIDE = (bypass or "").strip() or None
+
+
+def reset_proxy() -> None:
+    """Khôi phục proxy về default (K8s env HTTP_PROXY)."""
+    global _PROXY_OVERRIDE, _PROXY_BYPASS_OVERRIDE
+    _PROXY_OVERRIDE = None
+    _PROXY_BYPASS_OVERRIDE = None
+
+
 def _build_subprocess_env() -> dict:
     """Copy os.environ + ép NO_PROXY internal + forward HTTP_PROXY cho
     Chromium qua AGENT_BROWSER_PROXY / AGENT_BROWSER_PROXY_BYPASS.
@@ -164,9 +188,16 @@ def _build_subprocess_env() -> dict:
         or env.get("http_proxy")
         or ""
     )
-    if http_proxy and not env.get("AGENT_BROWSER_PROXY"):
+    # Per-scenario override ưu tiên CAO HƠN K8s env. Nếu scenario YAML khai
+    # `proxy:` → ép AGENT_BROWSER_PROXY = override (đè cả env Deployment).
+    if _PROXY_OVERRIDE:
+        env["AGENT_BROWSER_PROXY"] = _PROXY_OVERRIDE
+    elif http_proxy and not env.get("AGENT_BROWSER_PROXY"):
         env["AGENT_BROWSER_PROXY"] = http_proxy
-    if not env.get("AGENT_BROWSER_PROXY_BYPASS") and merged:
+
+    if _PROXY_BYPASS_OVERRIDE:
+        env["AGENT_BROWSER_PROXY_BYPASS"] = _PROXY_BYPASS_OVERRIDE
+    elif not env.get("AGENT_BROWSER_PROXY_BYPASS") and merged:
         env["AGENT_BROWSER_PROXY_BYPASS"] = merged
 
     # NOTE 2026-05-26: thử thêm AGENT_BROWSER_USER_AGENT + AGENT_BROWSER_ARGS
@@ -252,9 +283,33 @@ def open_url(url: str) -> str:
     _diag_log = _logging.getLogger("browser_adapter.open_url.diag")
 
     _validate_url_domain(url)
+
+    # Proxy recycle (2026-05-28): proxy là launch-time option của Chromium.
+    # Nếu scenario này yêu cầu proxy KHÁC proxy của browser đang mở → phải
+    # close --all để daemon spawn lại Chromium với proxy mới. KHÔNG đổi
+    # được proxy giữa chừng session.
+    global _ACTIVE_PROXY
+    if _ACTIVE_PROXY != _PROXY_OVERRIDE:
+        try:
+            _run(["close", "--all"], timeout=15)
+        except Exception:
+            pass
+        _ACTIVE_PROXY = None
+
+    # --proxy là global flag (PHẢI đặt TRƯỚC subcommand "open"). Truyền
+    # explicit để không phụ thuộc hoàn toàn vào env (belt-and-suspenders
+    # với _build_subprocess_env override).
+    open_args: list[str] = []
+    if _PROXY_OVERRIDE:
+        open_args = ["--proxy", _PROXY_OVERRIDE]
+        if _PROXY_BYPASS_OVERRIDE:
+            open_args += ["--proxy-bypass", _PROXY_BYPASS_OVERRIDE]
+    open_args += ["open", url]
+
     started = time.monotonic()
     try:
-        result = _run(["open", url], timeout=60)
+        result = _run(open_args, timeout=60)
+        _ACTIVE_PROXY = _PROXY_OVERRIDE
         elapsed_ms = int((time.monotonic() - started) * 1000)
         _diag_log.info(
             "OPEN_URL SUCCESS elapsed_ms=%d url=%s", elapsed_ms, url,
@@ -294,11 +349,14 @@ def open_url(url: str) -> str:
 
 
 def close_browser() -> str:
-    """Đóng browser."""
+    """Đóng browser. Reset _ACTIVE_PROXY để open_url tiếp theo recycle đúng."""
+    global _ACTIVE_PROXY
     try:
         return _run(["close"])
     except Exception:
         return ""
+    finally:
+        _ACTIVE_PROXY = None
 
 
 def page_contains_any(texts: tuple[str, ...]) -> bool:

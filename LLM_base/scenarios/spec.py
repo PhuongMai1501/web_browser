@@ -47,6 +47,14 @@ class ScenarioSpec(BaseModel):
     max_steps_default: int = 20
     allowed_domains: list[str] = Field(default_factory=list)
 
+    # Per-scenario proxy (2026-05-28) — agent-browser launch-time option.
+    # None → dùng proxy mặc định từ K8s Deployment env (HTTP_PROXY).
+    # Set khi scenario truy cập site local riêng cần proxy khác.
+    # Proxy áp dụng lúc open browser (đầu scenario); worker close → reopen
+    # giữa các scenario nên proxy mới session sau auto refresh.
+    proxy: Optional[str] = None            # vd "http://10.20.30.40:8080"
+    proxy_bypass: Optional[str] = None     # vd "localhost,*.internal" (NO_PROXY)
+
     # v2 input declaration (ưu tiên). context_schema giữ cho back-compat;
     # validator ưu tiên `inputs` nếu có, fallback về context_schema.
     inputs: list[InputField] = Field(default_factory=list)
