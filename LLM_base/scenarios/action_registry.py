@@ -65,3 +65,7 @@ class ActionResult:
     # thay vì hiển thị ref selector. Rỗng cho action không tác động element
     # (goto, wait_for, eval_js không có target). Set bởi click/fill/open_link.
     target_label: str = ""
+    # Ảnh CỤ THỂ để hiển thị cho user khi ask_user (vd ảnh captcha hiện tại) —
+    # _make_record ưu tiên dùng làm screenshot_path thay vì full screenshot, để
+    # user thấy đúng captcha tại thời điểm hỏi (không bị stale do reroll).
+    ask_image_path: str = ""

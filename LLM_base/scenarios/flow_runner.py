@@ -354,6 +354,11 @@ def _make_record(
         action_payload["downloaded_filename"] = result.downloaded_filename
     if result.downloaded_cdn_url:
         action_payload["downloaded_cdn_url"] = result.downloaded_cdn_url
+    # ask_image_path: ảnh cụ thể (vd captcha hiện tại) ưu tiên hơn full screenshot
+    # → user thấy đúng captcha tại thời điểm hỏi. Bỏ annotated để không lệch ảnh.
+    if result.ask_image_path:
+        screenshot_path = result.ask_image_path
+        annotated_path = ""
     return StepRecord(
         step=step_num,
         goal=goal,

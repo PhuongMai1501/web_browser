@@ -27,11 +27,7 @@ from store.scenario_repo import (
     ScenarioRevision,
 )
 
-# Optional dep — Phase 1 Input Fields integration.
-# Import lazy (TYPE_CHECKING) để không break test cũ không config input_field_repo.
-from typing import TYPE_CHECKING
-if TYPE_CHECKING:
-    from store.mysql_scenario_input_field_repo import MysqlScenarioInputFieldRepo
+# Phase 1 Input Fields integration đã DROP 2026-05-28. Inputs[] edit qua raw YAML.
 
 
 _log = logging.getLogger(__name__)
@@ -104,20 +100,10 @@ def _now() -> datetime:
 # ── Service ──────────────────────────────────────────────────────────────────
 
 class UserScenarioService:
-    """CRUD orchestrator. Stateless — dùng via DI.
+    """CRUD orchestrator. Stateless — dùng via DI."""
 
-    Phase 1 Input Fields (2026-05-11): optional `input_field_repo` để auto
-    sync inputs[] từ YAML vào bảng scenario_input_fields khi tạo revision mới.
-    Nếu None → skip sync (backward compatible cho test legacy).
-    """
-
-    def __init__(
-        self,
-        repo: ScenarioRepository,
-        input_field_repo: Optional["MysqlScenarioInputFieldRepo"] = None,
-    ):
+    def __init__(self, repo: ScenarioRepository):
         self._repo = repo
-        self._input_field_repo = input_field_repo
 
     # ── Validate (dry-run, no DB write) ──────────────────────────────────────
 
@@ -300,7 +286,7 @@ class UserScenarioService:
         )
         await self._repo.create_definition(defn)
 
-        # Tạo rev 1, skip auto-sync inputs vì sẽ clone fields metadata từ source
+        # Tạo rev 1 của scenario clone
         new_rev = await self._append_revision_from_result(
             scenario_id=new_id,
             result=result,
@@ -308,39 +294,10 @@ class UserScenarioService:
             user=user,
             parent_revision_id=None,                        # rev 1 của clone
             clone_source_revision_id=source_rev.id,         # trỏ về rev gốc
-            skip_input_sync=True,
         )
 
-        # Phase 1 Input Fields: copy fields metadata từ source rev (display_label,
-        # validation_rules, category, secret_ref, extraction_hint, ... — KHÔNG có
-        # trong YAML, chỉ có trong DB). Fallback parse YAML nếu source rev chưa
-        # có DB fields (vd source là rev cũ pre-Phase1).
-        if self._input_field_repo and new_rev.id:
-            from store.mysql_scenario_repo import MysqlScenarioRepo
-            import aiomysql
-            if isinstance(self._repo, MysqlScenarioRepo):
-                try:
-                    pool = self._repo._get_pool()
-                    async with pool.acquire() as conn:
-                        async with conn.cursor(aiomysql.DictCursor) as cur:
-                            new_scenario_pk = await self._repo._resolve_scenario_pk(
-                                cur, new_id
-                            )
-                    copied = await self._input_field_repo.clone_fields_to_revision(
-                        src_revision_id=source_rev.id,
-                        dst_revision_id=new_rev.id,
-                        dst_scenario_id=new_scenario_pk,
-                    )
-                    if copied == 0:
-                        # Source ko có DB fields → fallback import từ YAML
-                        await self._sync_inputs_from_yaml(
-                            new_rev.id, new_id, source_rev.raw_yaml
-                        )
-                except Exception as e:
-                    _log.error(
-                        "Failed clone input fields rev %d → %d: %s",
-                        source_rev.id, new_rev.id, e, exc_info=True,
-                    )
+        # Phase 1 Input Fields integration DROPPED 2026-05-28. Clone giờ chỉ
+        # copy raw_yaml — inputs[] đã nằm trong YAML, không cần sync DB.
 
         return defn
 
@@ -528,15 +485,10 @@ class UserScenarioService:
         user: AuthenticatedUser,
         parent_revision_id: Optional[int],
         clone_source_revision_id: Optional[int],
-        skip_input_sync: bool = False,
     ) -> ScenarioRevision:
         """Tạo ScenarioRevision từ NormalizeResult và insert.
 
         Nếu validation fail → vẫn lưu với status='failed' + errors.
-
-        Phase 1 Input Fields: sau khi insert rev, nếu có `input_field_repo`,
-        parse YAML inputs[] và backfill vào scenario_input_fields. Skip bằng
-        skip_input_sync=True (vd clone flow sẽ clone fields metadata sau).
         """
         status = "passed" if result.validation_ok else "failed"
         # Lưu normalized nếu có, còn không lưu raw_yaml data (không fail hẳn)
@@ -551,10 +503,8 @@ class UserScenarioService:
             yaml_hash=result.yaml_hash,
             parent_revision_id=parent_revision_id,
             clone_source_revision_id=clone_source_revision_id,
-            schema_version=1,
             static_validation_status=status,
             static_validation_errors=errors_json,
-            created_by=user.user_id,
             created_at=_now(),
         )
         new_id = await self._repo.append_revision(rev)
@@ -564,73 +514,4 @@ class UserScenarioService:
             # Shouldn't happen — defensive
             raise RuntimeError(f"Revision {new_id} insert OK nhưng không fetch được")
 
-        # Phase 1 Input Fields: auto-sync inputs từ YAML vào DB
-        if self._input_field_repo and not skip_input_sync:
-            await self._sync_inputs_from_yaml(new_id, scenario_id, raw_yaml)
-
         return persisted
-
-    async def _sync_inputs_from_yaml(
-        self,
-        rev_id: int,
-        scenario_code: str,
-        raw_yaml: str,
-    ) -> int:
-        """Parse YAML inputs[] và INSERT vào scenario_input_fields.
-
-        Idempotent: skip nếu rev đã có fields (vd backfill script đã chạy).
-        Tolerant: lỗi 1 field không break cả rev (chỉ log warning).
-
-        Return: số fields đã insert.
-        """
-        if self._input_field_repo is None:
-            return 0
-
-        existing = await self._input_field_repo.count_by_revision(rev_id)
-        if existing > 0:
-            _log.info(
-                "Skip input sync for rev_id=%d: already has %d fields",
-                rev_id, existing,
-            )
-            return 0
-
-        # Resolve scenario_pk (BIGINT) qua MysqlScenarioRepo internal helper.
-        # Helper signature: _resolve_scenario_pk(cur, code) — cần acquire cursor.
-        from store.mysql_scenario_repo import MysqlScenarioRepo
-        import aiomysql
-        if not isinstance(self._repo, MysqlScenarioRepo):
-            _log.warning(
-                "Skip input sync: scenario_repo không phải MySQL backend"
-            )
-            return 0
-        try:
-            pool = self._repo._get_pool()
-            async with pool.acquire() as conn:
-                async with conn.cursor(aiomysql.DictCursor) as cur:
-                    scenario_pk = await self._repo._resolve_scenario_pk(
-                        cur, scenario_code
-                    )
-        except Exception as e:
-            _log.warning(
-                "Failed resolve scenario_pk for '%s': %s",
-                scenario_code, e,
-            )
-            return 0
-
-        # Lazy import để tránh circular dep
-        from services.yaml_sync import YamlSyncService
-
-        try:
-            yaml_sync = YamlSyncService(self._repo, self._input_field_repo)
-            inserted = await yaml_sync.import_inputs_from_yaml(
-                rev_id=rev_id,
-                scenario_id=scenario_pk,
-                raw_yaml=raw_yaml,
-            )
-            return inserted
-        except Exception as e:
-            _log.error(
-                "Failed sync inputs for rev_id=%d: %s",
-                rev_id, e, exc_info=True,
-            )
-            return 0

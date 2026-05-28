@@ -33,7 +33,6 @@ from store.scenario_repo import (  # noqa: E402
     DefinitionFilters,
     ScenarioDefinition,
     ScenarioRevision,
-    ScenarioRun,
 )
 from store.sqlite_scenario_repo import SqliteScenarioRepo  # noqa: E402
 
@@ -103,7 +102,6 @@ def _sample_rev(
         parent_revision_id=parent,
         clone_source_revision_id=clone_src,
         static_validation_status=status,
-        created_by="hiepqn",
         created_at=_now(),
     )
 
@@ -284,59 +282,6 @@ async def test_concurrent_append():
         ctx.cleanup()
 
 
-async def test_runs():
-    _group("4. RUNS")
-    repo, _, ctx = await _make_repo()
-    try:
-        await repo.create_definition(_sample_def("s1"))
-        rev_id = await repo.append_revision(_sample_rev())
-
-        # Create run
-        run = ScenarioRun(
-            scenario_id="s1",
-            revision_id=rev_id,
-            session_id="sess-1",
-            mode="test",
-            started_by="hiepqn",
-            runtime_policy_snapshot={"allowed_domains": ["example.com"], "max_steps": 20},
-            status="running",
-            created_at=_now(),
-        )
-        run_id = await repo.create_run(run)
-        _check("create_run returns id", run_id > 0)
-
-        got = await repo.get_run(run_id)
-        _check("get_run round-trip", got is not None and got.session_id == "sess-1")
-        _check("policy snapshot JSON preserved",
-               got.runtime_policy_snapshot == {"allowed_domains": ["example.com"], "max_steps": 20})
-        _check("mode preserved", got.mode == "test")
-
-        # Lifecycle
-        await repo.update_run_status(run_id, "completed")
-        got = await repo.get_run(run_id)
-        _check("update_run_status → completed", got.status == "completed")
-
-        # Invalid status rejected
-        try:
-            await repo.update_run_status(run_id, "bogus")
-            _check("reject invalid run status", False)
-        except ValueError:
-            _check("reject invalid run status", True)
-
-        # Multiple runs per scenario
-        for i in range(3):
-            r = ScenarioRun(
-                scenario_id="s1", revision_id=rev_id, session_id=f"sess-{i+2}",
-                mode="production", started_by="hiepqn",
-                runtime_policy_snapshot={}, status="running", created_at=_now(),
-            )
-            await repo.create_run(r)
-        _check("multi runs per scenario", True)  # nếu create ok = ok
-    finally:
-        await repo.close()
-        ctx.cleanup()
-
-
 async def test_integrity():
     _group("5. INTEGRITY (FK + CHECK + datetime)")
     repo, _, ctx = await _make_repo()
@@ -398,8 +343,8 @@ async def main():
     groups = [
         test_definitions,
         test_revisions,
+        # test_runs DROPPED 2026-05-28 (bảng scenario_runs đã DROP)
         test_concurrent_append,
-        test_runs,
         test_integrity,
     ]
     for fn in groups:

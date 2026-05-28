@@ -1,7 +1,11 @@
 """
 store/scenario_repo.py — Abstract interface for scenario persistence.
 
-Schema: 3 tables (scenario_definitions, scenario_revisions, scenario_runs).
+Schema: 2 tables (scenario_definitions, scenario_revisions).
+Bảng scenario_runs đã DROP 2026-05-28 (xem DB_CLEANUP_REVIEW.md): worker
+không insert vào bảng này; audit per-run đi qua Redis + CDN (request_flow.json,
+session.json, result.json) thay vì DB.
+
 Xem PLAN_USER_SCENARIO_CUSTOMIZATION.md §1.2 để biết chi tiết field.
 
 Phase 1 implementation: SqliteScenarioRepo (via aiosqlite).
@@ -24,8 +28,7 @@ class ScenarioDefinition(BaseModel):
     """Row in scenario_definitions table."""
     id: str                                      # "builtin_xxx" | "user_xxx_yyy"
     name: str
-    owner_id: Optional[str] = None               # NULL cho builtin
-    org_id: Optional[str] = None                 # Phase 2+
+    owner_id: Optional[str] = None               # NULL cho builtin; maps DB column `owner_code`
     source_type: str                             # 'builtin' | 'user' | 'cloned'
     visibility: str = "private"                  # 'private' | 'org' | 'public'
     published_revision_id: Optional[int] = None  # NULL = chưa publish
@@ -44,26 +47,11 @@ class ScenarioRevision(BaseModel):
     yaml_hash: str                               # sha256(raw_yaml)
     parent_revision_id: Optional[int] = None     # rev trước trong CÙNG scenario
     clone_source_revision_id: Optional[int] = None  # rev gốc khi clone từ scenario khác
-    schema_version: int = 1
     static_validation_status: str                # 'pending' | 'passed' | 'failed'
     static_validation_errors: Optional[list] = None
     last_test_run_at: Optional[datetime] = None
     last_test_run_status: Optional[str] = None   # 'passed' | 'failed'
     last_test_run_id: Optional[int] = None
-    created_by: str
-    created_at: datetime
-
-
-class ScenarioRun(BaseModel):
-    """Row in scenario_runs table. Created khi session start, updated khi terminal."""
-    id: Optional[int] = None                     # None = not yet persisted, filled by create_run
-    scenario_id: str
-    revision_id: int                             # pin cứng revision chạy
-    session_id: str                              # link sang runtime session (Redis)
-    mode: str                                    # 'production' | 'test'
-    started_by: str
-    runtime_policy_snapshot: dict                # allowed_domains + quota + hook whitelist tại start
-    status: str                                  # 'running' | 'completed' | 'failed' | 'cancelled'
     created_at: datetime
 
 
@@ -210,21 +198,6 @@ class ScenarioRepository(ABC):
             f"{type(self).__name__} chưa support update_revision_yaml "
             f"(Phase 1 Input Fields chỉ chạy với MySQL backend)"
         )
-
-    # ── Runs ─────────────────────────────────────────────────────────────────
-
-    @abstractmethod
-    async def create_run(self, run: ScenarioRun) -> int:
-        """Insert run, trả id. Gọi từ API khi session enqueue."""
-
-    @abstractmethod
-    async def update_run_status(self, run_id: int, status: str) -> None:
-        """Gọi từ worker khi session done/failed/cancelled (G6).
-        status phải là terminal value."""
-
-    @abstractmethod
-    async def get_run(self, run_id: int) -> Optional[ScenarioRun]:
-        """Get run by id."""
 
     # ── Lifecycle ────────────────────────────────────────────────────────────
 

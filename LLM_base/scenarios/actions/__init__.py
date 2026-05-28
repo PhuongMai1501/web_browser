@@ -11,6 +11,7 @@ from . import goto  # noqa: F401
 from . import if_visible  # noqa: F401
 from . import open_link  # noqa: F401
 from . import scroll  # noqa: F401
+from . import solve_captcha  # noqa: F401
 from . import upload_download  # noqa: F401
 from . import upload_html_source  # noqa: F401
 from . import wait_for  # noqa: F401

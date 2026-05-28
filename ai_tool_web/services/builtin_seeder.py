@@ -43,15 +43,12 @@ def _now() -> datetime:
 async def seed_builtin_from_yaml(
     repo: ScenarioRepository,
     directory: Optional[Path] = None,
-    system_user_id: str = "system",
 ) -> int:
     """Seed builtin scenarios từ thư mục YAML. Idempotent — skip nếu id đã tồn tại.
 
     Args:
         repo: ScenarioRepository đã init.
         directory: override thư mục YAML; default `LLM_base/scenarios/builtin/`.
-        system_user_id: value cho `created_by` của revision (không phải owner_id —
-                        owner_id=None cho builtin).
 
     Returns:
         Số scenario mới tạo. 0 nếu tất cả đã tồn tại.
@@ -69,7 +66,7 @@ async def seed_builtin_from_yaml(
     created = 0
     for path in yaml_files:
         try:
-            n = await _seed_one(repo, path, system_user_id)
+            n = await _seed_one(repo, path)
             created += n
         except Exception as e:
             _log.error("Seed fail cho %s: %s", path.name, e)
@@ -81,7 +78,6 @@ async def seed_builtin_from_yaml(
 async def _seed_one(
     repo: ScenarioRepository,
     path: Path,
-    system_user_id: str,
 ) -> int:
     """Seed 1 file. Trả 1 nếu insert, 0 nếu đã tồn tại."""
     raw_yaml = path.read_text(encoding="utf-8")
@@ -133,10 +129,8 @@ async def _seed_one(
         yaml_hash=result.yaml_hash,
         parent_revision_id=None,
         clone_source_revision_id=None,
-        schema_version=1,
         static_validation_status="passed",
         static_validation_errors=None,
-        created_by=system_user_id,
         created_at=now,
     )
     rev_id = await repo.append_revision(rev)

@@ -12,18 +12,14 @@ Schema mapping (model ↔ DB column):
 | ScenarioDefinition.created_at        | scenario_definitions.date_created                    |
 | ScenarioDefinition.updated_at        | scenario_definitions.date_updated                    |
 | ScenarioRevision.scenario_id (str)   | resolve via scenario_definitions.code → id BIGINT FK |
-| ScenarioRevision.created_by (str)    | DB created_by BIGINT NULL (Phase 1: ghi NULL)        |
 | ScenarioRevision.created_at          | date_created                                         |
-| ScenarioRun.scenario_id (str)        | same — code → BIGINT lookup                          |
-| ScenarioRun.started_by (str)         | DB started_by BIGINT NULL (Phase 1: ghi NULL)        |
-| ScenarioRun.created_at               | date_created                                         |
 
 DB column `id BIGINT AUTO_INCREMENT` chỉ dùng nội bộ làm FK target —
 không expose ra model. Service layer luôn dùng `code` string làm business key.
 
-Phase 2 (real auth) sẽ populate INT user IDs vào created_by/owner_id;
-hiện tại dùng `owner_code` string làm bridge. Audit fields created_by/started_by
-mất giá trị string lúc save; reload return "" sentinel.
+Cleanup 2026-05-28: DROP bảng `scenario_runs` + cột audit `created_by/updated_by`
+trên 2 bảng + `org_id`/`owner_id` (int) trên definitions + `schema_version` trên
+revisions. Xem DB_CLEANUP_REVIEW.md.
 
 Connection pool size mặc định 5, configurable qua MYSQL_POOL_SIZE env.
 """
@@ -43,7 +39,6 @@ from store.scenario_repo import (
     ScenarioDefinition,
     ScenarioRepository,
     ScenarioRevision,
-    ScenarioRun,
 )
 
 
@@ -89,7 +84,6 @@ def _row_to_definition(row: dict) -> ScenarioDefinition:
         id=row["code"],
         name=row["name"],
         owner_id=row.get("owner_code"),
-        org_id=str(row["org_id"]) if row.get("org_id") is not None else None,
         source_type=row["source_type"],
         visibility=row["visibility"],
         published_revision_id=row.get("published_revision_id"),
@@ -109,27 +103,11 @@ def _row_to_revision(row: dict) -> ScenarioRevision:
         yaml_hash=row["yaml_hash"],
         parent_revision_id=row.get("parent_revision_id"),
         clone_source_revision_id=row.get("clone_source_revision_id"),
-        schema_version=row.get("schema_version") or 1,
         static_validation_status=row["static_validation_status"],
         static_validation_errors=_json_load(row.get("static_validation_errors")),
         last_test_run_at=_ensure_aware_utc(row.get("last_test_run_at")),
         last_test_run_status=row.get("last_test_run_status"),
         last_test_run_id=row.get("last_test_run_id"),
-        created_by=str(row.get("created_by") or ""),
-        created_at=_ensure_aware_utc(row["date_created"]),
-    )
-
-
-def _row_to_run(row: dict) -> ScenarioRun:
-    return ScenarioRun(
-        id=row["id"],
-        scenario_id=row["scenario_code"],
-        revision_id=row["revision_id"],
-        session_id=row["session_id"],
-        mode=row["mode"],
-        started_by=str(row.get("started_by") or ""),
-        runtime_policy_snapshot=_json_load(row["runtime_policy_snapshot"]) or {},
-        status=row["status"],
         created_at=_ensure_aware_utc(row["date_created"]),
     )
 
@@ -226,26 +204,21 @@ class MysqlScenarioRepo(ScenarioRepository):
                     await cur.execute(
                         """
                         INSERT INTO scenario_definitions
-                            (code, name, owner_id, owner_code, org_id,
-                             source_type, visibility, published_revision_id,
-                             is_archived, date_created, date_updated,
-                             created_by, updated_by)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                            (code, name, owner_code, source_type, visibility,
+                             published_revision_id, is_archived,
+                             date_created, date_updated)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                         """,
                         (
                             defn.id,
                             defn.name,
-                            None,                         # owner_id BIGINT — Phase 1 luôn NULL
-                            defn.owner_id,                # owner_code VARCHAR
-                            None,                         # org_id INT — Phase 2
+                            defn.owner_id,                # → owner_code VARCHAR
                             defn.source_type,
                             defn.visibility,
                             defn.published_revision_id,
                             1 if defn.is_archived else 0,
                             defn.created_at,
                             defn.updated_at,
-                            None,                         # created_by — Phase 1 NULL
-                            None,                         # updated_by — Phase 1 NULL
                         ),
                     )
                 except aiomysql.IntegrityError as e:
@@ -389,14 +362,13 @@ class MysqlScenarioRepo(ScenarioRepository):
                                 (scenario_id, version_no, raw_yaml,
                                  normalized_spec_json, yaml_hash,
                                  parent_revision_id, clone_source_revision_id,
-                                 schema_version, static_validation_status,
+                                 static_validation_status,
                                  static_validation_errors,
                                  last_test_run_at, last_test_run_status,
                                  last_test_run_id,
-                                 created_by, date_created, date_updated,
-                                 updated_by)
-                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                                    %s, %s, %s, %s, %s, %s, %s)
+                                 date_created, date_updated)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s,
+                                    %s, %s, %s, %s, %s)
                             """,
                             (
                                 scenario_pk,
@@ -406,16 +378,13 @@ class MysqlScenarioRepo(ScenarioRepository):
                                 rev.yaml_hash,
                                 rev.parent_revision_id,
                                 rev.clone_source_revision_id,
-                                rev.schema_version,
                                 rev.static_validation_status,
                                 _json_dump(rev.static_validation_errors),
                                 rev.last_test_run_at,
                                 rev.last_test_run_status,
                                 rev.last_test_run_id,
-                                None,                  # created_by Phase 1 NULL
                                 rev.created_at,
                                 rev.created_at,        # date_updated = same lúc tạo
-                                None,                  # updated_by
                             ),
                         )
                         new_id = cur.lastrowid
@@ -584,66 +553,6 @@ class MysqlScenarioRepo(ScenarioRepository):
                 if cur.rowcount == 0:
                     raise ValueError(f"Revision {rev_id} không tồn tại")
 
-    # ── Runs ─────────────────────────────────────────────────────────────────
-
-    async def create_run(self, run: ScenarioRun) -> int:
-        pool = self._get_pool()
-        async with pool.acquire() as conn:
-            async with conn.cursor(aiomysql.DictCursor) as cur:
-                scenario_pk = await self._resolve_scenario_pk(
-                    cur, run.scenario_id
-                )
-                await cur.execute(
-                    """
-                    INSERT INTO scenario_runs
-                        (scenario_id, revision_id, session_id, mode,
-                         started_by, runtime_policy_snapshot, status,
-                         date_created, date_updated, created_by, updated_by)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    """,
-                    (
-                        scenario_pk,
-                        run.revision_id,
-                        run.session_id,
-                        run.mode,
-                        None,                          # started_by Phase 1 NULL
-                        _json_dump(run.runtime_policy_snapshot),
-                        run.status,
-                        run.created_at,
-                        run.created_at,
-                        None,
-                        None,
-                    ),
-                )
-                return int(cur.lastrowid)
-
-    async def update_run_status(self, run_id: int, status: str) -> None:
-        if status not in ("running", "completed", "failed", "cancelled"):
-            raise ValueError(f"Invalid run status: {status}")
-        pool = self._get_pool()
-        async with pool.acquire() as conn:
-            async with conn.cursor() as cur:
-                await cur.execute(
-                    """
-                    UPDATE scenario_runs
-                    SET status = %s, date_updated = %s
-                    WHERE id = %s
-                    """,
-                    (status, _now_utc(), run_id),
-                )
-
-    async def get_run(self, run_id: int) -> Optional[ScenarioRun]:
-        pool = self._get_pool()
-        async with pool.acquire() as conn:
-            async with conn.cursor(aiomysql.DictCursor) as cur:
-                await cur.execute(
-                    """
-                    SELECT r.*, d.code AS scenario_code
-                    FROM scenario_runs r
-                    JOIN scenario_definitions d ON d.id = r.scenario_id
-                    WHERE r.id = %s
-                    """,
-                    (run_id,),
-                )
-                row = await cur.fetchone()
-        return _row_to_run(row) if row else None
+    # ── Runs: DROPPED 2026-05-28 ─────────────────────────────────────────────
+    # Bảng scenario_runs đã DROP. Worker không insert vào bảng này;
+    # audit per-run đi qua Redis + CDN. Xem DB_CLEANUP_REVIEW.md mục 3.

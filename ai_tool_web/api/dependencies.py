@@ -11,19 +11,16 @@ Wire vào app.py qua startup hook:
     app.state.scenario_repo = SqliteScenarioRepo(...)
     await app.state.scenario_repo.init()
     app.state.auth_provider = MockAuthProvider()
+
+Cleanup 2026-05-28: scenario_image + scenario_input_field repos đã DROP.
 """
 
 from __future__ import annotations
 
-from typing import Optional
-
 from fastapi import Depends, HTTPException, Request
 
 from auth.providers import AuthenticatedUser, AuthProvider
-from services.scenario_image_service import ScenarioImageService
 from services.user_scenario_service import UserScenarioService
-from store.mysql_scenario_image_repo import MysqlScenarioImageRepo
-from store.mysql_scenario_input_field_repo import MysqlScenarioInputFieldRepo
 from store.scenario_repo import ScenarioRepository
 
 
@@ -54,44 +51,10 @@ async def get_current_user(
     return user
 
 
-async def get_input_field_repo_optional(
-    request: Request,
-) -> Optional[MysqlScenarioInputFieldRepo]:
-    """Lấy MysqlScenarioInputFieldRepo nếu đã init, None nếu chưa.
-
-    Optional vì SQLite backend skip wiring. UserScenarioService accept None
-    để giữ backward compat với test legacy.
-    """
-    return getattr(request.app.state, "input_field_repo", None)
-
-
 async def get_scenario_service(
     repo: ScenarioRepository = Depends(get_repo),
-    input_field_repo: Optional[MysqlScenarioInputFieldRepo] = Depends(
-        get_input_field_repo_optional
-    ),
 ) -> UserScenarioService:
-    """UserScenarioService với optional input_field_repo (Phase 1 Input Fields).
-
-    Khi backend=mysql + có input_field_repo: tạo revision mới sẽ auto-sync
-    inputs[] từ YAML vào scenario_input_fields. Clone scenario cũng copy
-    fields metadata từ source rev.
-
-    Khi backend=sqlite hoặc input_field_repo=None: chỉ làm CRUD legacy, không sync.
+    """UserScenarioService. Phase 1 Input Fields đã drop 2026-05-28 →
+    không còn input_field_repo dependency. Inputs[] edit qua raw YAML.
     """
-    return UserScenarioService(repo, input_field_repo=input_field_repo)
-
-
-async def get_image_repo(request: Request) -> MysqlScenarioImageRepo:
-    """Lấy MysqlScenarioImageRepo singleton (init 1 lần ở startup)."""
-    repo = getattr(request.app.state, "scenario_image_repo", None)
-    if repo is None:
-        raise HTTPException(503, "Scenario image repository chưa init")
-    return repo
-
-
-async def get_image_service(
-    scenario_repo: ScenarioRepository = Depends(get_repo),
-    image_repo: MysqlScenarioImageRepo = Depends(get_image_repo),
-) -> ScenarioImageService:
-    return ScenarioImageService(scenario_repo, image_repo)
+    return UserScenarioService(repo)

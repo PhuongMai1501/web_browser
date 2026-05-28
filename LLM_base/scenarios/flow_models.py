@@ -145,6 +145,34 @@ class FlowStep(BaseModel):
     format: Optional[str] = None      # "outer_html" (default) | "inner_html"
     filename: Optional[str] = None    # tên file .html; auto-gen nếu None
 
+    # solve_captcha — đọc CAPTCHA bằng vision LLM (OCR) + điền + verify + retry.
+    # `target` (ở trên) không dùng cho action này; các target riêng bên dưới.
+    fill_target: Optional[TargetSpec] = None      # ô nhập mã xác minh (BẮT BUỘC)
+    submit_target: Optional[TargetSpec] = None    # nút submit để verify captcha
+    submit_eval_js: Optional[str] = None          # JS submit (ưu tiên hơn submit_target;
+                                                  # dùng khi nút không target được/onclick-only)
+    reload_target: Optional[TargetSpec] = None    # link "Thay đổi" để reroll
+    reload_eval_js: Optional[str] = None          # JS reroll captcha (ưu tiên hơn reload_target)
+    verify_fail_any: Optional[list[str]] = None   # text site hiện khi mã SAI
+    verify_success_any: Optional[list[str]] = None  # text báo chắc chắn ĐÚNG (optional)
+    max_attempts: int = 4                         # số lần OCR+verify tối đa
+    vision_model: Optional[str] = None            # model MẠNH dùng khi escalate (vd gpt-4o)
+    vision_model_cheap: Optional[str] = None      # model RẺ thử trước (vd gpt-4o-mini);
+                                                  # None → dùng vision_model luôn (không escalate)
+    cheap_attempts: Optional[int] = None          # số lần đầu dùng model rẻ trước khi
+                                                  # escalate sang vision_model (default 2)
+    crop_selector: Optional[str] = None           # CSS selector ảnh captcha để crop
+    captcha_src_selector: Optional[str] = None     # CSS selector <img> captcha — lấy
+                                                   # THẲNG src (data URI base64) → OCR ảnh
+                                                   # gốc sạch, không cần screenshot/crop.
+                                                   # Tốt nhất khi captcha là <img> base64.
+    captcha_image_hint: Optional[str] = None      # URL ảnh khoanh đỏ vùng captcha —
+                                                  # gửi kèm cho GPT-4o làm tham chiếu vị
+                                                  # trí khi auto-crop không cắt được
+    manual_only: bool = False                     # solve_captcha: chỉ tiêu thụ mã user
+                                                  # nhập (context[field]); rỗng → no-op.
+                                                  # Dùng cho step sau ask_user.
+
     # condition branching (if_visible)
     then: list["FlowStep"] = Field(default_factory=list)
     else_: list["FlowStep"] = Field(default_factory=list, alias="else")

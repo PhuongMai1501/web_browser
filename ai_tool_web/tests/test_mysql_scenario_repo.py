@@ -58,7 +58,6 @@ from store.scenario_repo import (  # noqa: E402
     DefinitionFilters,
     ScenarioDefinition,
     ScenarioRevision,
-    ScenarioRun,
 )
 
 
@@ -175,7 +174,6 @@ def _sample_rev(
         parent_revision_id=parent,
         clone_source_revision_id=clone_src,
         static_validation_status=status,
-        created_by="hiepqn",
         created_at=_now(),
     )
 
@@ -305,50 +303,6 @@ async def test_revisions(repo: MysqlScenarioRepo) -> None:
         _check("invalid test_status rejected", True)
 
 
-async def test_runs(repo: MysqlScenarioRepo) -> None:
-    _group("3. RUNS")
-
-    sid = f"{_TEST_PREFIX}run_s"
-    await repo.create_definition(_sample_def(sid))
-    rid = await repo.append_revision(_sample_rev(sid))
-
-    run = ScenarioRun(
-        scenario_id=sid,
-        revision_id=rid,
-        session_id="9ee0143d-f924-4ef9-a894-3817188242c0",
-        mode="production",
-        started_by="hiepqn",
-        runtime_policy_snapshot={"allowed_domains": ["example.com"], "quota": 5},
-        status="running",
-        created_at=_now(),
-    )
-    run_id = await repo.create_run(run)
-    _check("create_run returns int id",
-           isinstance(run_id, int) and run_id > 0)
-
-    got = await repo.get_run(run_id)
-    _check("get_run round-trip",
-           got is not None and got.id == run_id and got.scenario_id == sid)
-    _check("session_id preserved",
-           got.session_id == "9ee0143d-f924-4ef9-a894-3817188242c0")
-    _check("mode preserved", got.mode == "production")
-    _check("runtime_policy_snapshot roundtrip",
-           got.runtime_policy_snapshot == {"allowed_domains": ["example.com"], "quota": 5})
-    _check("status running", got.status == "running")
-
-    # Update status terminal
-    await repo.update_run_status(run_id, "completed")
-    got2 = await repo.get_run(run_id)
-    _check("update_run_status to completed", got2.status == "completed")
-
-    # Invalid status
-    try:
-        await repo.update_run_status(run_id, "weird")
-        _check("invalid run_status rejected", False, "should have raised")
-    except ValueError:
-        _check("invalid run_status rejected", True)
-
-
 async def test_clone_source(repo: MysqlScenarioRepo) -> None:
     _group("4. CLONE SOURCE TRACKING")
 
@@ -406,7 +360,7 @@ async def main() -> int:
     try:
         await test_definitions(repo)
         await test_revisions(repo)
-        await test_runs(repo)
+        # test_runs DROPPED 2026-05-28 (bảng scenario_runs đã DROP)
         await test_clone_source(repo)
         await test_resolve_pk_error(repo)
     except Exception:

@@ -28,7 +28,6 @@ from store.scenario_repo import (
     ScenarioDefinition,
     ScenarioRepository,
     ScenarioRevision,
-    ScenarioRun,
 )
 
 
@@ -70,7 +69,6 @@ def _row_to_definition(row) -> ScenarioDefinition:
         id=row["id"],
         name=row["name"],
         owner_id=row["owner_id"],
-        org_id=row["org_id"],
         source_type=row["source_type"],
         visibility=row["visibility"],
         published_revision_id=row["published_revision_id"],
@@ -90,27 +88,11 @@ def _row_to_revision(row) -> ScenarioRevision:
         yaml_hash=row["yaml_hash"],
         parent_revision_id=row["parent_revision_id"],
         clone_source_revision_id=row["clone_source_revision_id"],
-        schema_version=row["schema_version"],
         static_validation_status=row["static_validation_status"],
         static_validation_errors=_json_load(row["static_validation_errors"]),
         last_test_run_at=_str_to_dt(row["last_test_run_at"]),
         last_test_run_status=row["last_test_run_status"],
         last_test_run_id=row["last_test_run_id"],
-        created_by=row["created_by"],
-        created_at=_str_to_dt(row["created_at"]),
-    )
-
-
-def _row_to_run(row) -> ScenarioRun:
-    return ScenarioRun(
-        id=row["id"],
-        scenario_id=row["scenario_id"],
-        revision_id=row["revision_id"],
-        session_id=row["session_id"],
-        mode=row["mode"],
-        started_by=row["started_by"],
-        runtime_policy_snapshot=_json_load(row["runtime_policy_snapshot"]) or {},
-        status=row["status"],
         created_at=_str_to_dt(row["created_at"]),
     )
 
@@ -167,12 +149,12 @@ class SqliteScenarioRepo(ScenarioRepository):
             await db.execute(
                 """
                 INSERT INTO scenario_definitions
-                    (id, name, owner_id, org_id, source_type, visibility,
+                    (id, name, owner_id, source_type, visibility,
                      published_revision_id, is_archived, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    defn.id, defn.name, defn.owner_id, defn.org_id,
+                    defn.id, defn.name, defn.owner_id,
                     defn.source_type, defn.visibility,
                     defn.published_revision_id,
                     1 if defn.is_archived else 0,
@@ -302,11 +284,11 @@ class SqliteScenarioRepo(ScenarioRepository):
                     INSERT INTO scenario_revisions
                         (scenario_id, version_no, raw_yaml, normalized_spec_json,
                          yaml_hash, parent_revision_id, clone_source_revision_id,
-                         schema_version, static_validation_status,
+                         static_validation_status,
                          static_validation_errors, last_test_run_at,
                          last_test_run_status, last_test_run_id,
-                         created_by, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         rev.scenario_id, next_version, rev.raw_yaml,
@@ -314,13 +296,11 @@ class SqliteScenarioRepo(ScenarioRepository):
                         rev.yaml_hash,
                         rev.parent_revision_id,
                         rev.clone_source_revision_id,
-                        rev.schema_version,
                         rev.static_validation_status,
                         _json_dump(rev.static_validation_errors),
                         _dt_to_str(rev.last_test_run_at),
                         rev.last_test_run_status,
                         rev.last_test_run_id,
-                        rev.created_by,
                         _dt_to_str(rev.created_at),
                     ),
                 )
@@ -434,42 +414,6 @@ class SqliteScenarioRepo(ScenarioRepository):
     # Phase 1 chỉ chạy với MySQL backend ở production. SQLite kế thừa default
     # NotImplementedError từ ScenarioRepository base class.
 
-    # ── Runs ─────────────────────────────────────────────────────────────────
-
-    async def create_run(self, run: ScenarioRun) -> int:
-        db = self._db()
-        cur = await db.execute(
-            """
-            INSERT INTO scenario_runs
-                (scenario_id, revision_id, session_id, mode, started_by,
-                 runtime_policy_snapshot, status, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                run.scenario_id, run.revision_id, run.session_id,
-                run.mode, run.started_by,
-                _json_dump(run.runtime_policy_snapshot),
-                run.status,
-                _dt_to_str(run.created_at),
-            ),
-        )
-        await db.commit()
-        return int(cur.lastrowid)
-
-    async def update_run_status(self, run_id: int, status: str) -> None:
-        if status not in ("running", "completed", "failed", "cancelled"):
-            raise ValueError(f"Invalid run status: {status}")
-        db = self._db()
-        await db.execute(
-            "UPDATE scenario_runs SET status = ? WHERE id = ?",
-            (status, run_id),
-        )
-        await db.commit()
-
-    async def get_run(self, run_id: int) -> Optional[ScenarioRun]:
-        db = self._db()
-        async with db.execute(
-            "SELECT * FROM scenario_runs WHERE id = ?", (run_id,)
-        ) as cur:
-            row = await cur.fetchone()
-        return _row_to_run(row) if row else None
+    # ── Runs: DROPPED 2026-05-28 ─────────────────────────────────────────────
+    # Bảng scenario_runs đã DROP. Worker không insert; audit qua Redis + CDN.
+    # Xem DB_CLEANUP_REVIEW.md mục 3.

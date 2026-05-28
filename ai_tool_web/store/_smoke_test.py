@@ -15,7 +15,7 @@ if hasattr(sys.stdout, "reconfigure"):
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from store.scenario_repo import (
-    DefinitionFilters, ScenarioDefinition, ScenarioRevision, ScenarioRun,
+    DefinitionFilters, ScenarioDefinition, ScenarioRevision,
 )
 from store.sqlite_scenario_repo import SqliteScenarioRepo
 
@@ -63,7 +63,6 @@ async def main():
                 yaml_hash=f"hash{i+1}",
                 parent_revision_id=rev_ids[-1] if rev_ids else None,
                 static_validation_status="passed",
-                created_by="hiepqn",
                 created_at=_now(),
             )
             new_id = await repo.append_revision(rev)
@@ -109,25 +108,11 @@ async def main():
         assert await repo.count_builtin() == 0
         print(f"[OK] count_builtin = 0")
 
-        # 10. create_run + update_run_status
-        run = ScenarioRun(
-            scenario_id="test_user_scenario",
-            revision_id=rev_ids[1],
-            session_id="sess-abc",
-            mode="test",
-            started_by="hiepqn",
-            runtime_policy_snapshot={"allowed_domains": ["example.com"]},
-            status="running",
-            created_at=_now(),
-        )
-        run_id = await repo.create_run(run)
-        await repo.update_run_status(run_id, "completed")
-        got = await repo.get_run(run_id)
-        assert got.status == "completed"
-        print(f"[OK] run lifecycle: id={run_id} status={got.status}")
+        # 10. create_run + update_run_status DROPPED 2026-05-28
+        #     (bảng scenario_runs đã DROP — audit qua Redis+CDN)
 
-        # 11. update_revision_test_status
-        await repo.update_revision_test_status(rev_ids[1], "passed", run_id, _now())
+        # 11. update_revision_test_status (vẫn LIVE — last_test_run_* fields còn)
+        await repo.update_revision_test_status(rev_ids[1], "passed", 1, _now())
         rev = await repo.get_revision(rev_ids[1])
         assert rev.last_test_run_status == "passed"
         print(f"[OK] rev test status: {rev.last_test_run_status}")

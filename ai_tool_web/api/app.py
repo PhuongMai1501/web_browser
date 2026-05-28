@@ -29,8 +29,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from api.exception_handlers import register_scenario_exception_handlers
 from api.recovery import recovery_loop
 from api.routes import (
-    admin, auth, browser, cancel, health, input_fields, result, resume,
-    scenario_generate, scenario_images, scenarios, screenshots, sessions,
+    admin, auth, browser, cancel, health, result, resume,
+    scenario_generate, scenarios, screenshots, sessions,
     stream, tasks, user_hooks, user_scenarios,
 )
 from auth.mock_provider import MockAuthProvider
@@ -77,8 +77,6 @@ for _router_module in (
     auth,                               # /v1/auth/me — admin status check
     admin,                              # /v1/admin/* — session/worker monitor (admin-only)
     user_scenarios, user_hooks,         # Phase 1 user CRUD (X-User-Id + SQLite)
-    scenario_images,                    # Visual Hint Targeting Phase 1
-    input_fields,                       # Phase 1 Input Fields Management
     scenario_generate,                  # POST /v1/scenarios/generate (LLM-assisted)
 ):
     app.include_router(_router_module.router)
@@ -189,48 +187,9 @@ async def _startup():
         except Exception as e:
             _log.error("SQLite builtin seed fail: %s", e)
 
-    # ── Visual Hint Targeting Phase 1: scenario_images repo (MySQL only) ─────
-    # Service ScenarioImageService hiện chỉ support MySQL backend (lookup
-    # scenario PK BIGINT). SQLite backend → skip wiring, route trả 503.
-    if backend == "mysql":
-        from store.mysql_scenario_image_repo import MysqlScenarioImageRepo
-        image_repo = MysqlScenarioImageRepo(
-            host=os.environ["MYSQL_HOST"],
-            port=int(os.getenv("MYSQL_PORT", "3306")),
-            user=os.environ["MYSQL_USER"],
-            password=os.environ["MYSQL_PASSWORD"],
-            db=os.environ["MYSQL_DB"],
-            pool_size=int(os.getenv("MYSQL_IMAGE_POOL_SIZE", "3")),
-        )
-        await image_repo.init()
-        app.state.scenario_image_repo = image_repo
-        _log.info("Scenario image repo initialized (mysql)")
-    else:
-        _log.info(
-            "Scenario image repo skipped (backend=%s, only mysql supported)",
-            backend,
-        )
-
-    # ── Input Fields Management Phase 1: scenario_input_fields repo (MySQL only) ─
-    # Service tương tự ScenarioImageService — chỉ MySQL backend. SQLite skip.
-    if backend == "mysql":
-        from store.mysql_scenario_input_field_repo import MysqlScenarioInputFieldRepo
-        input_field_repo = MysqlScenarioInputFieldRepo(
-            host=os.environ["MYSQL_HOST"],
-            port=int(os.getenv("MYSQL_PORT", "3306")),
-            user=os.environ["MYSQL_USER"],
-            password=os.environ["MYSQL_PASSWORD"],
-            db=os.environ["MYSQL_DB"],
-            pool_size=int(os.getenv("MYSQL_INPUT_FIELD_POOL_SIZE", "3")),
-        )
-        await input_field_repo.init()
-        app.state.input_field_repo = input_field_repo
-        _log.info("Scenario input field repo initialized (mysql)")
-    else:
-        _log.info(
-            "Input field repo skipped (backend=%s, only mysql supported)",
-            backend,
-        )
+    # scenario_images + scenario_input_fields repos DROPPED 2026-05-28.
+    # Xem DB_CLEANUP_REVIEW.md. Visual hint giờ dùng GDrive URL trực tiếp
+    # trong YAML image_hint; input fields edit qua raw YAML.
 
     _log.info("API started. Recovery loop running.")
 
@@ -245,21 +204,7 @@ async def _shutdown():
         except Exception as e:
             _log.error("Error closing scenario repo: %s", e)
 
-    image_repo = getattr(app.state, "scenario_image_repo", None)
-    if image_repo is not None:
-        try:
-            await image_repo.close()
-            _log.info("Scenario image repo closed")
-        except Exception as e:
-            _log.error("Error closing scenario image repo: %s", e)
-
-    input_field_repo = getattr(app.state, "input_field_repo", None)
-    if input_field_repo is not None:
-        try:
-            await input_field_repo.close()
-            _log.info("Scenario input field repo closed")
-        except Exception as e:
-            _log.error("Error closing input field repo: %s", e)
+    # scenario_image_repo + input_field_repo DROPPED 2026-05-28.
 
 
 @app.get("/v1/debug/test-upload")
