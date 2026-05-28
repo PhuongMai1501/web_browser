@@ -26,7 +26,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Header, HTTPException, Path, Query
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from api.sse_stream import sse_generator
 from models import (
@@ -87,7 +87,12 @@ class TaskRunRequest(BaseModel):
     """Body cho POST /v1/tasks/{task_id}/run.
 
     Giống RunRequest nhưng KHÔNG có field task_id (lấy từ URL path).
+
+    extra="allow": capture field client gửi không khớp schema vào model_extra
+    để debug Sup Agent typo field name. Forward sang RunRequest qua model_dump.
     """
+    model_config = ConfigDict(extra="allow")
+
     # Mode (chọn 1 trong 3)
     scenario: str = "chang_login"
     scenario_yaml: Optional[str] = None

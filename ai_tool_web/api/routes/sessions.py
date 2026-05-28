@@ -124,11 +124,46 @@ def _mask_context_secrets(context: dict | None) -> dict:
     return masked
 
 
-def _build_request_flow(req, user_id, source, model, tokens_in, tokens_out) -> dict:
+def _snapshot_client_request(req) -> dict:
+    """Capture state của RunRequest NGAY khi nhận, TRƯỚC mọi mutation.
+
+    Phân biệt rõ "client thực sự gửi gì" vs "server tự gen/promote". Dùng để
+    debug case Sup Agent claim gửi YAML nhưng audit log cũ (đọc sau mutation)
+    không phân biệt được client-provided YAML vs LLM-generated YAML.
+
+    Cũng capture `model_extra` (Pydantic V2, extra="allow") — bắt field name
+    sai client gửi (vd `yaml` thay vì `scenario_yaml`) thay vì silent drop.
+    """
+    return {
+        "scenario": req.scenario,
+        "scenario_yaml_present": bool(req.scenario_yaml),
+        "scenario_yaml_len": len(req.scenario_yaml or ""),
+        "query": req.query,
+        "query_site_hint": req.query_site_hint,
+        "context_keys": list((req.context or {}).keys()),
+        "goal": req.goal,
+        "url": req.url,
+        "max_steps": req.max_steps,
+        "name": req.name,
+        "callback_url": req.callback_url,
+        "ask_missing_inputs": req.ask_missing_inputs,
+        "cancel_prev_iterations": req.cancel_prev_iterations,
+        # Pydantic V2 model_extra: dict các field client gửi mà KHÔNG khớp
+        # schema RunRequest. Nếu non-empty → Sup Agent có khả năng sai tên field.
+        "unknown_fields": getattr(req, "model_extra", None) or {},
+    }
+
+
+def _build_request_flow(req, user_id, source, model, tokens_in, tokens_out,
+                        client_snapshot=None) -> dict:
     """Build dict audit trail của 1 request từ Sup Agent.
 
     Worker sẽ ghi thành request_flow.json + upload MinIO. User check sau khi
     session done để biết Sup Agent đã gửi gì + API quyết định gì.
+
+    `client_snapshot`: state TRƯỚC khi server mutate `req` (gen LLM, promote
+    YAML từ query, override req.scenario...). Nguồn sự thật về client gửi gì.
+    `raw_body` cũ giữ backward-compat — chứa state SAU mutation.
     """
     from datetime import datetime, timezone
     return {
@@ -136,7 +171,8 @@ def _build_request_flow(req, user_id, source, model, tokens_in, tokens_out) -> d
         "endpoint": f"POST /v1/tasks/{req.task_id}/run" if req.task_id else "POST /v1/sessions",
         "user_id": (user_id or "").strip(),
         "task_id": req.task_id or "",
-        "raw_body": {
+        "client_snapshot": client_snapshot or {},   # NEW: trước mutation
+        "raw_body": {                                # GIỮ: sau mutation (backward compat)
             "scenario": req.scenario,
             "query": req.query,
             "query_site_hint": req.query_site_hint,
@@ -272,6 +308,19 @@ async def create_session(
     nếu rỗng). Sẽ deprecate sau khi WebUI migrate xong.
     """
     redis = get_async_redis()
+
+    # Snapshot client state NGAY khi nhận, TRƯỚC mọi mutation (gen LLM, promote
+    # YAML từ query, override req.scenario...). Audit log dùng để phân biệt
+    # client thực sự gửi gì vs server tự gen. KHÔNG dùng req.* sau dòng này
+    # để debug "client sent X", phải dùng client_snapshot.
+    client_snapshot = _snapshot_client_request(req)
+    if client_snapshot["unknown_fields"]:
+        _log.warning(
+            "[task=%s] Client gửi unknown fields KHÔNG khớp RunRequest schema: %s "
+            "(Sup Agent có thể typo field name?)",
+            req.task_id or "(auto)",
+            list(client_snapshot["unknown_fields"].keys()),
+        )
 
     if await job_queue.is_over_capacity(redis):
         raise HTTPException(503, detail="Queue is full. Try again later.")
@@ -454,7 +503,8 @@ async def create_session(
         # Sup Agent / Hiệp dùng để debug sau khi session done.
         "request_flow": _build_request_flow(req, x_user_id, request_source,
                                             gen_model_used, gen_tokens_in,
-                                            gen_tokens_out),
+                                            gen_tokens_out,
+                                            client_snapshot=client_snapshot),
     }
 
     # Callback mode: lưu callback config vào scenario_config để worker đọc

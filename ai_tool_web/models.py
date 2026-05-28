@@ -8,13 +8,19 @@ StepRecord (internal) vs StepEvent (external):
 
 from __future__ import annotations
 from typing import Literal, Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from datetime import datetime
 
 
 # ── Request Models ─────────────────────────────────────────────────────────────
 
 class RunRequest(BaseModel):
+    # extra="allow": Pydantic capture mọi field client gửi VÀO `model_extra`
+    # (dict[str, Any]). Diagnostic: nếu Sup Agent gửi field name sai
+    # (vd `yaml` thay vì `scenario_yaml`) → audit log ghi vào client_snapshot
+    # để debug, không silent drop.
+    model_config = ConfigDict(extra="allow")
+
     # Scenario id — validate runtime qua ScenarioStore (không dùng Literal để
     # có thể thêm scenario mới qua admin API /v1/scenarios).
     # Nếu `scenario_yaml` được set, tool-web bỏ qua DB lookup và dùng YAML
