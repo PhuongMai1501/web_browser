@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import uuid
+from typing import Optional
 
 from fastapi import APIRouter, Header, HTTPException
 
@@ -124,6 +125,40 @@ def _mask_context_secrets(context: dict | None) -> dict:
     return masked
 
 
+def _detect_client_bug(req) -> Optional[dict]:
+    """Phát hiện pattern client gửi request bị thiếu data — báo BE team, KHÔNG
+    workaround server side.
+
+    Hiện tại check 1 pattern:
+      - `scenario='custom'` (sentinel Sup Agent dùng cho YAML inline) NHƯNG
+        client KHÔNG gửi `scenario_yaml` → có khả năng Sup Agent forget attach
+        cached YAML vào request body → API rơi xuống LLM gen từ query rác.
+
+    Return: dict diagnostic nếu phát hiện bug, None nếu request OK.
+    Audit log (request_flow.json) sẽ chứa field `client_diagnostic` để Sup
+    Agent team grep ra ngay khi check log.
+    """
+    if (req.scenario == "custom"
+            and not req.scenario_yaml
+            and req.query):
+        return {
+            "issue_code": "CUSTOM_SCENARIO_MISSING_YAML",
+            "severity": "ERROR",
+            "message": (
+                "scenario='custom' nhưng client KHÔNG gửi `scenario_yaml`. "
+                "Sup Agent có thể quên attach cached YAML vào request body. "
+                "API rơi xuống nhánh LLM gen từ `query`, kết quả thường vô nghĩa."
+            ),
+            "recommended_action": (
+                "Sup Agent client: include cached YAML vào field `scenario_yaml` "
+                "mỗi request kèm scenario='custom'. Pattern thiết kế (sessions.py:285): "
+                "cache YAML → resend kèm query gốc mỗi lần gọi."
+            ),
+            "request_query_sample": (req.query or "")[:60],
+        }
+    return None
+
+
 def _snapshot_client_request(req) -> dict:
     """Capture state của RunRequest NGAY khi nhận, TRƯỚC mọi mutation.
 
@@ -155,7 +190,7 @@ def _snapshot_client_request(req) -> dict:
 
 
 def _build_request_flow(req, user_id, source, model, tokens_in, tokens_out,
-                        client_snapshot=None) -> dict:
+                        client_snapshot=None, client_diagnostic=None) -> dict:
     """Build dict audit trail của 1 request từ Sup Agent.
 
     Worker sẽ ghi thành request_flow.json + upload MinIO. User check sau khi
@@ -172,6 +207,7 @@ def _build_request_flow(req, user_id, source, model, tokens_in, tokens_out,
         "user_id": (user_id or "").strip(),
         "task_id": req.task_id or "",
         "client_snapshot": client_snapshot or {},   # NEW: trước mutation
+        "client_diagnostic": client_diagnostic,      # NEW: None nếu request OK; dict nếu detect bug
         "raw_body": {                                # GIỮ: sau mutation (backward compat)
             "scenario": req.scenario,
             "query": req.query,
@@ -320,6 +356,21 @@ async def create_session(
             "(Sup Agent có thể typo field name?)",
             req.task_id or "(auto)",
             list(client_snapshot["unknown_fields"].keys()),
+        )
+
+    # Detect bug client side (vd scenario=custom thiếu scenario_yaml). Audit
+    # log ghi `client_diagnostic` để Sup Agent team grep ra ngay khi check log.
+    # KHÔNG workaround server side — báo BE fix cho đúng.
+    client_diagnostic = _detect_client_bug(req)
+    if client_diagnostic:
+        _log.error(
+            "[task=%s] CLIENT_BUG_DETECTED %s: %s | callback=%s url=%s query=%r",
+            req.task_id or "(auto)",
+            client_diagnostic["issue_code"],
+            client_diagnostic["message"],
+            req.callback_url or "",
+            req.url or "",
+            (req.query or "")[:80],
         )
 
     if await job_queue.is_over_capacity(redis):
@@ -504,7 +555,8 @@ async def create_session(
         "request_flow": _build_request_flow(req, x_user_id, request_source,
                                             gen_model_used, gen_tokens_in,
                                             gen_tokens_out,
-                                            client_snapshot=client_snapshot),
+                                            client_snapshot=client_snapshot,
+                                            client_diagnostic=client_diagnostic),
     }
 
     # Callback mode: lưu callback config vào scenario_config để worker đọc
