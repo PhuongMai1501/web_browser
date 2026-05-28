@@ -84,7 +84,6 @@ class RevisionSummaryResponse(BaseModel):
     parent_revision_id: Optional[int]
     clone_source_revision_id: Optional[int]
     last_test_run_status: Optional[str]
-    created_by: str
     created_at: datetime
 
 
@@ -121,7 +120,7 @@ def _rev_summary(r) -> Optional[RevisionSummaryResponse]:
         parent_revision_id=r.parent_revision_id,
         clone_source_revision_id=r.clone_source_revision_id,
         last_test_run_status=r.last_test_run_status,
-        created_by=r.created_by, created_at=r.created_at,
+        created_at=r.created_at,
     )
 
 
@@ -132,7 +131,7 @@ def _rev_full(r) -> RevisionFullResponse:
         parent_revision_id=r.parent_revision_id,
         clone_source_revision_id=r.clone_source_revision_id,
         last_test_run_status=r.last_test_run_status,
-        created_by=r.created_by, created_at=r.created_at,
+        created_at=r.created_at,
         raw_yaml=r.raw_yaml,
         normalized_spec_json=r.normalized_spec_json,
         static_validation_errors=r.static_validation_errors,
