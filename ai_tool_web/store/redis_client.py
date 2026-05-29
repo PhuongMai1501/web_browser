@@ -20,6 +20,22 @@ from config import REDIS_URL
 _async_pool: ConnectionPool | None = None
 
 
+def _supports_client_no_setinfo() -> bool:
+    """redis-py >= 5.0.1 mới có param `client_no_setinfo`. Image cũ có thể vẫn
+    pin redis-py 5.0.0 (param không tồn tại) → TypeError khi truyền.
+    Check version runtime để conditional pass kwarg.
+    """
+    try:
+        ver = tuple(int(x) for x in _sync_redis.__version__.split(".")[:3])
+        return ver >= (5, 0, 1)
+    except Exception:
+        return False
+
+
+# Build sẵn extra kwargs theo redis-py version. Tránh check lại mỗi connection.
+_EXTRA_KW: dict = {"client_no_setinfo": True} if _supports_client_no_setinfo() else {}
+
+
 def get_async_redis() -> Redis:
     global _async_pool
     if _async_pool is None:
@@ -27,7 +43,7 @@ def get_async_redis() -> Redis:
             REDIS_URL,
             decode_responses=True,
             protocol=2,                  # Skip HELLO (compat Redis < 6.0)
-            client_no_setinfo=True,      # Skip CLIENT SETINFO (compat Redis < 7.2)
+            **_EXTRA_KW,                 # client_no_setinfo nếu redis-py >= 5.0.1
         )
     return Redis(connection_pool=_async_pool)
 
@@ -38,5 +54,5 @@ def get_sync_redis() -> _sync_redis.Redis:
         REDIS_URL,
         decode_responses=True,
         protocol=2,
-        client_no_setinfo=True,
+        **_EXTRA_KW,
     )
