@@ -173,6 +173,14 @@ class FlowStep(BaseModel):
                                                   # nhập (context[field]); rỗng → no-op.
                                                   # Dùng cho step sau ask_user.
 
+    # http_login action — HTTP-based SSO chain (Plan B bypass Chrome JS redirect).
+    # Worker dùng requests Python POST credentials, follow JS location.href chain
+    # bằng regex, lấy cookies, set vào Chrome rồi navigate return_url.
+    return_url: Optional[str] = None        # URL Chrome navigate sau khi cookies set
+    username_from: Optional[str] = None     # context key (alt nếu khác value_from)
+    password_from: Optional[str] = None     # context key cho password (type=secret)
+    max_redirects: int = 5                  # số JS location.href chain max follow
+
     # condition branching (if_visible)
     then: list["FlowStep"] = Field(default_factory=list)
     else_: list["FlowStep"] = Field(default_factory=list, alias="else")

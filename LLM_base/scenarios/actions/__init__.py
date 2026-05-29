@@ -8,6 +8,7 @@ from . import eval_js  # noqa: F401
 from . import extract_data  # noqa: F401
 from . import fill  # noqa: F401
 from . import goto  # noqa: F401
+from . import http_login  # noqa: F401
 from . import if_visible  # noqa: F401
 from . import open_link  # noqa: F401
 from . import scroll  # noqa: F401
