@@ -20,20 +20,20 @@ from config import REDIS_URL
 _async_pool: ConnectionPool | None = None
 
 
-def _supports_client_no_setinfo() -> bool:
-    """redis-py >= 5.0.1 mới có param `client_no_setinfo`. Image cũ có thể vẫn
-    pin redis-py 5.0.0 (param không tồn tại) → TypeError khi truyền.
-    Check version runtime để conditional pass kwarg.
-    """
+def _supports_protocol_kwarg() -> bool:
+    """`protocol` kwarg thêm từ redis-py 5.0.0. redis-py 4.x reject kwarg này."""
     try:
         ver = tuple(int(x) for x in _sync_redis.__version__.split(".")[:3])
-        return ver >= (5, 0, 1)
+        return ver >= (5, 0, 0)
     except Exception:
         return False
 
 
-# Build sẵn extra kwargs theo redis-py version. Tránh check lại mỗi connection.
-_EXTRA_KW: dict = {"client_no_setinfo": True} if _supports_client_no_setinfo() else {}
+# Build extra kwargs theo redis-py version. Skip `client_no_setinfo` hoàn toàn
+# vì redis-py 5.0.1 có bug plumbing (param forward xuống AbstractConnection.__init__
+# → TypeError). Nếu redis-py 4.x → KHÔNG gửi HELLO/SETINFO mặc định → compat
+# Redis 3.2.12 OK luôn.
+_EXTRA_KW: dict = {"protocol": 2} if _supports_protocol_kwarg() else {}
 
 
 def get_async_redis() -> Redis:
@@ -42,8 +42,7 @@ def get_async_redis() -> Redis:
         _async_pool = ConnectionPool.from_url(
             REDIS_URL,
             decode_responses=True,
-            protocol=2,                  # Skip HELLO (compat Redis < 6.0)
-            **_EXTRA_KW,                 # client_no_setinfo nếu redis-py >= 5.0.1
+            **_EXTRA_KW,                 # protocol=2 nếu redis-py 5.x; bỏ trống nếu 4.x
         )
     return Redis(connection_pool=_async_pool)
 
@@ -53,6 +52,5 @@ def get_sync_redis() -> _sync_redis.Redis:
     return _sync_redis.from_url(
         REDIS_URL,
         decode_responses=True,
-        protocol=2,
         **_EXTRA_KW,
     )
