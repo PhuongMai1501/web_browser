@@ -8,7 +8,7 @@ Serialize được thành JSON để lưu Redis hoặc YAML để seed.
 
 from __future__ import annotations
 
-from typing import Literal, Optional
+from typing import Literal, Optional, Union
 
 from pydantic import BaseModel, Field
 
@@ -62,7 +62,10 @@ class ScenarioSpec(BaseModel):
     # v2 flow fields — chỉ cần set khi mode='flow' hoặc 'hybrid'.
     steps: list[FlowStep] = Field(default_factory=list)
     success: Optional[SuccessRule] = None
-    failure: Optional[FailureRule] = None
+    # failure: 1 rule (object) HOẶC nhiều rule (list) — mỗi rule 1 `code`/`message`
+    # riêng. Runner duyệt list từ trên xuống, khớp cái đầu tiên thì dừng. Dạng
+    # object đơn giữ back-compat với YAML cũ.
+    failure: Optional[Union[FailureRule, list[FailureRule]]] = None
 
     # Legacy — giữ để các spec cũ không vỡ.
     context_schema: dict = Field(default_factory=dict)

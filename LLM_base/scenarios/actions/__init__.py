@@ -6,6 +6,7 @@ from . import ask_user  # noqa: F401
 from . import click  # noqa: F401
 from . import eval_js  # noqa: F401
 from . import extract_data  # noqa: F401
+from . import fetch_to_cdn  # noqa: F401
 from . import fill  # noqa: F401
 from . import goto  # noqa: F401
 from . import http_login  # noqa: F401

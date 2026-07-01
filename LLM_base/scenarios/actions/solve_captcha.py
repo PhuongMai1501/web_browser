@@ -163,22 +163,25 @@ _LOCATE_CAPTCHA_JS = """
 @action("solve_captcha")
 def run_solve_captcha(rt, step) -> ActionResult:
     api_key = getattr(rt, "api_key", "") or os.getenv("OPENAI_API_KEY", "")
-    if not api_key:
+    # Cho phép provider riêng cho captcha (Qwen local / Gemini) qua CAPTCHA_BASE_URL
+    # + CAPTCHA_API_KEY — khi đó KHÔNG bắt buộc OPENAI_API_KEY. Server local có thể
+    # chỉ cần CAPTCHA_BASE_URL (read_captcha_text tự dùng placeholder key).
+    if (not api_key and not os.getenv("CAPTCHA_API_KEY", "").strip()
+            and not os.getenv("CAPTCHA_BASE_URL", "").strip()):
         return ActionResult(
             ok=False, action_type="solve_captcha",
-            error="OPENAI_API_KEY chưa cấu hình — không gọi được vision OCR",
+            error="Thiếu cấu hình vision OCR (CAPTCHA_BASE_URL / CAPTCHA_API_KEY / OPENAI_API_KEY)",
         )
 
-    from services.captcha_solver import read_captcha_text
+    from services.captcha_solver import read_captcha_text, _CAPTCHA_MODEL
 
     max_attempts = max(1, int(step.max_attempts or 4))
     fail_any = _DEFAULT_FAIL_PATTERNS + tuple(step.verify_fail_any or [])
     success_any = tuple(step.verify_success_any or [])
-    # Cost optimization: thử model RẺ (gpt-4o-mini) cho `cheap_attempts` lần đầu,
-    # fail thì escalate sang model MẠNH (gpt-4o). Mỗi lần là captcha mới (reroll).
-    strong_model = step.vision_model or os.getenv("CAPTCHA_MODEL", "gpt-4o")
-    cheap_model = step.vision_model_cheap or ""
-    cheap_n = step.cheap_attempts if step.cheap_attempts is not None else 2
+    # Model OCR do CODE/ENV quyết (CAPTCHA_MODEL) — KHÔNG cho YAML đè (step.vision_model*
+    # bị BỎ QUA: model + endpoint phải đi đôi, quản tập trung ở env tránh lệch provider).
+    # read_captcha_text(model="") tự dùng _CAPTCHA_MODEL. ocr_model_tag chỉ để log.
+    ocr_model_tag = _CAPTCHA_MODEL.split("-")[-1]
     url_before = _safe_url(rt.browser)
     last_code = ""
     diag: list[str] = []   # chẩn đoán nhồi vào result để log session đọc được
@@ -273,16 +276,15 @@ def run_solve_captcha(rt, step) -> ActionResult:
                     ocr_path = cropped
                     crop_tag = "crop"
 
-        # 3. OCR (giữ hoa/thường). Model: rẻ trước, escalate khi quá cheap_n lần.
+        # 3. OCR (giữ hoa/thường). Model lấy từ env CAPTCHA_MODEL (model="").
         #    Khi KHÔNG crop được → gửi kèm ảnh hint khoanh đỏ (nếu có).
-        use_model = cheap_model if (cheap_model and attempt <= cheap_n) else strong_model
         hint_url = step.captcha_image_hint if crop_tag == "full" else ""
         code = read_captcha_text(
             api_key=api_key, image_path=ocr_path,
-            model=use_model, hint=step.note or "",
+            model="", hint=step.note or "",   # model="" → CAPTCHA_MODEL (env); YAML không đè
             hint_image_url=hint_url or "",
         )
-        diag = [f"a{attempt}:ocr={code or '∅'}({crop_tag}{'+hint' if hint_url else ''},{use_model.split('-')[-1]})"]
+        diag = [f"a{attempt}:ocr={code or '∅'}({crop_tag}{'+hint' if hint_url else ''},{ocr_model_tag})"]
         if acq:
             diag.append(f"acq[{acq}]")
         if not code:
@@ -299,7 +301,7 @@ def run_solve_captcha(rt, step) -> ActionResult:
             if fresh and _file_hash(fresh) != _file_hash(ocr_path):
                 code2 = read_captcha_text(
                     api_key=api_key, image_path=fresh,
-                    model=use_model, hint=step.note or "",
+                    model="", hint=step.note or "",
                 )
                 diag.append(f"recap({code}->{code2 or '∅'})")
                 if code2:
@@ -361,15 +363,21 @@ def run_solve_captcha(rt, step) -> ActionResult:
             url_before=url_before,
         )
 
+    diag_str = (
+        f"Captcha fail sau {max_attempts} lần. Mã cuối='{last_code or '∅'}'. "
+        f"[{' | '.join(diag)}]. Nếu fill/submit báo NOINPUT/NOBTN → DOM khác "
+        "dự đoán (chỉnh selector/JS). Nếu OCR sai liên tục → kiểm tra crop / "
+        "model (env CAPTCHA_MODEL) / endpoint, hoặc thêm `field` để hỏi user nhập tay."
+    )
+    # Có fail_code trong YAML → prefix mã máy-đọc-được (đồng dạng failure rule
+    # "[CODE] message") để caller/Sup-Agent phân biệt loại lỗi; vẫn giữ diag để debug.
+    if step.fail_code:
+        err = f"[{step.fail_code}] {step.fail_message or 'Giải captcha thất bại'}. {diag_str}"
+    else:
+        err = diag_str
     return ActionResult(
         ok=False, action_type="solve_captcha", text_typed=last_code,
-        url_before=url_before,
-        error=(
-            f"Captcha fail sau {max_attempts} lần. Mã cuối='{last_code or '∅'}'. "
-            f"[{' | '.join(diag)}]. Nếu fill/submit báo NOINPUT/NOBTN → DOM khác "
-            "dự đoán (chỉnh selector/JS). Nếu OCR sai liên tục → kiểm tra crop / "
-            "đổi vision_model=gpt-4o, hoặc thêm `field` để hỏi user nhập tay."
-        ),
+        url_before=url_before, error=err,
     )
 
 

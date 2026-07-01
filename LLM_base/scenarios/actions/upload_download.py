@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -100,6 +101,12 @@ def run_upload_download(rt, step) -> ActionResult:
             ),
         )
 
+    # Sanitize tên file trước khi upload:
+    #  - Cắt hậu tố trùng " (N)" Chrome tự thêm khi file trùng tên đã tồn tại
+    #    trong dir (vd "...324 (2).zip" → "...324.zip").
+    #  - Đổi khoảng trắng còn lại → "-" (space thô làm CDN URL không truy cập được).
+    target = _sanitize_download_name(target)
+
     cdn_url = _upload_to_cdn(rt, target, step.remote_dir)
     if not cdn_url:
         return ActionResult(
@@ -107,11 +114,23 @@ def run_upload_download(rt, step) -> ActionResult:
             error=f"Upload {target.name} → CDN thất bại (xem worker log)",
         )
 
+    # Đưa link vào output chính (result.data) để Sup Agent đọc như "đầu ra" của
+    # scenario (ngoài artifacts.downloaded_files). Merge để không đè data của
+    # extract_data nếu scenario dùng cả hai.
+    _write_output_holder(rt, target.name, cdn_url)
+
     # Delete local sau upload thành công
     try:
         target.unlink()
     except Exception as e:
         _log.warning("Không xóa được local file %s: %s", target, e)
+
+    # Dọn file rác cùng loại còn sót trong dir (orphan từ session trước / bản
+    # scenario click-only không qua upload_download). Tránh tích lũy khiến Chrome
+    # thêm " (N)" cho lần tải SAU. Chỉ dọn khi có extensions_filter để không xóa
+    # nhầm file khác loại (vd .html của upload_html_source).
+    if extensions_filter:
+        _cleanup_stale_files(download_dir, extensions_filter)
 
     return ActionResult(
         ok=True, action_type="upload_download",
@@ -119,6 +138,49 @@ def run_upload_download(rt, step) -> ActionResult:
         downloaded_cdn_url=cdn_url,
         reason=step.note or f"Upload {target.name} → CDN",
     )
+
+
+def _cleanup_stale_files(download_dir: Path, extensions_filter: set[str]) -> None:
+    """Xóa các file còn sót trong download_dir khớp extensions_filter (orphan).
+
+    Worker đơn luồng → tại thời điểm này không có session khác đang tải, nên
+    xóa file cùng loại còn lại là an toàn. Bỏ qua file đang download dở.
+    """
+    for p in download_dir.iterdir():
+        try:
+            if not p.is_file():
+                continue
+            low = p.name.lower()
+            if any(low.endswith(s) for s in _INCOMPLETE_SUFFIXES):
+                continue
+            if p.suffix.lower() not in extensions_filter:
+                continue
+            p.unlink()
+            _log.info("Dọn orphan download: %s", p.name)
+        except OSError as e:
+            _log.debug("Không xóa được orphan %s: %s", p, e)
+
+
+def _write_output_holder(rt, filename: str, cdn_url: str) -> None:
+    """Ghi link tải vào rt.output_holder["data"] → surface vào result.data.
+
+    Merge vào dict data sẵn có (nếu có) thay vì đè. Nhiều download trong 1 flow:
+    download_url = cái mới nhất, đồng thời gom vào list downloads[].
+    """
+    holder = getattr(rt, "output_holder", None)
+    if holder is None:
+        return
+    data = holder.get("data")
+    if not isinstance(data, dict):
+        data = {}
+    data["download_url"] = cdn_url
+    data["filename"] = filename
+    downloads = data.get("downloads")
+    if not isinstance(downloads, list):
+        downloads = []
+    downloads.append({"filename": filename, "url": cdn_url})
+    data["downloads"] = downloads
+    holder["data"] = data
 
 
 def _resolve_download_dir() -> tuple[Path | None, str]:
@@ -264,6 +326,37 @@ def _find_new_files_global(start_ts: float, extensions_filter: set[str]) -> str:
     if not lines:
         return ""
     return str(lines[:10])
+
+
+def _sanitize_download_name(path: Path) -> Path:
+    """Đổi tên file trên đĩa để tên + CDN URL sạch.
+
+    1. Cắt hậu tố trùng " (N)" Chrome tự thêm khi file trùng tên: "name (2).ext"
+       → "name.ext".
+    2. Đổi khoảng trắng còn lại → "-" (space thô làm CDN URL không truy cập được).
+    Giữ nguyên ngoặc đơn hợp lệ khác.
+
+    Returns:
+        Path mới (đã rename) nếu cần đổi; path gốc nếu không đổi / rename fail.
+    """
+    name = path.name
+    stem, dot, ext = name.rpartition(".")
+    if not dot:  # không có extension
+        stem = name
+    # Cắt " (N)" ở cuối stem (Chrome duplicate suffix)
+    stem = re.sub(r"\s*\(\d+\)\s*$", "", stem)
+    safe = f"{stem}.{ext}" if dot else stem
+    # Collapse khoảng trắng còn lại → "-"
+    safe = re.sub(r"\s+", "-", safe)
+    if safe == name or not safe:
+        return path
+    new_path = path.with_name(safe)
+    try:
+        path.replace(new_path)  # replace: ghi đè nếu tên đích đã tồn tại (orphan cũ)
+        return new_path
+    except OSError as e:
+        _log.warning("Rename '%s' → '%s' fail: %s — dùng tên gốc", name, safe, e)
+        return path
 
 
 def _normalize_extensions(exts) -> set[str]:

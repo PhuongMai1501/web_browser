@@ -333,6 +333,21 @@ def _check_rule(rule, rt: FlowRuntime) -> bool:
     return True
 
 
+def _match_failure(failure, rt: FlowRuntime):
+    """Trả về FailureRule ĐẦU TIÊN khớp; None nếu không có.
+
+    `failure` có thể là 1 rule (object) hoặc list rule. Duyệt từ trên xuống,
+    khớp cái nào trước thì trả cái đó → đặt rule cụ thể lên trước rule chung.
+    """
+    if failure is None:
+        return None
+    rules = failure if isinstance(failure, list) else [failure]
+    for rule in rules:
+        if _check_rule(rule, rt):
+            return rule
+    return None
+
+
 # ── Record helpers ────────────────────────────────────────────────────────────
 
 def _make_record(
@@ -568,9 +583,10 @@ def run_flow(
                     return
 
             # Check success/failure sau mỗi step
-            if _check_rule(spec.failure, rt):
-                code = spec.failure.code if spec.failure else "FLOW_FAILED"
-                msg = spec.failure.message if spec.failure else "Flow failed."
+            matched_fail = _match_failure(spec.failure, rt)
+            if matched_fail is not None:
+                code = matched_fail.code
+                msg = matched_fail.message
                 failed_rec = _make_failed_record(step_num, spec.goal or spec.display_name, f"[{code}] {msg}", rt)
                 all_records.append(failed_rec)
                 yield failed_rec

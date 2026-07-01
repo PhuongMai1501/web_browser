@@ -12,12 +12,31 @@ Khác với services/vision_matcher.py:
 
 Module này chỉ làm 1 call duy nhất, không retry, không raise — fail trả "".
 
+Provider: dùng client OpenAI-compatible. Mặc định gọi OpenAI; có thể TRỎ sang
+Qwen-VL LOCAL (vLLM/Ollama/SGLang), Gemini, hoặc provider khác MÀ KHÔNG đổi code,
+chỉ qua env (xem dưới). OpenAI ngày càng TỪ CHỐI giải captcha → chuyển sang server
+Qwen local (không policy từ chối, không phí, dữ liệu không ra ngoài).
+
 Env config:
-- CAPTCHA_MODEL    — default "gpt-4o" (KHÔNG dùng mini: mini yếu hẳn với captcha
-                     méo. Override = "gpt-4o-mini" nếu chấp nhận accuracy thấp hơn
-                     để tiết kiệm cost.)
+- CAPTCHA_MODEL    — tên model (đúng --served-model-name). MẶC ĐỊNH
+                     "Qwen/Qwen3.5-27B-FP8". YAML KHÔNG đè được — model CHỈ từ env này.
+- CAPTCHA_BASE_URL — endpoint OpenAI-compatible. MẶC ĐỊNH Qwen vLLM nội bộ
+                     "http://124.197.18.58/vllm/v1". Đặt "" để dùng OpenAI chính chủ.
+- CAPTCHA_API_KEY  — API key RIÊNG cho captcha (Gemini/OpenAI). ƯU TIÊN hơn
+                     OPENAI_API_KEY. Server LOCAL thường KHÔNG cần (code tự dùng
+                     placeholder khi có CAPTCHA_BASE_URL). ⚠️ key THẬT chỉ đặt qua
+                     K8s Secret → env; KHÔNG hardcode code/YAML, KHÔNG log ra ngoài.
 - CAPTCHA_TIMEOUT  — default 30 (giây)
 - CAPTCHA_MAX_TOKENS — default 24 (chỉ cần trả vài ký tự)
+- CAPTCHA_MAX_LEN  — default 12; kết quả dài hơn = model giải thích/từ chối, loại.
+
+Sampling (CHỈ áp dụng khi CAPTCHA_BASE_URL set = self-host vLLM/Qwen; OpenAI chính
+chủ luôn dùng temperature=0). Mặc định = preset Qwen "non-thinking/general":
+- CAPTCHA_THINKING — "1/true" bật suy luận; MẶC ĐỊNH TẮT cho OCR (bật phải tăng
+                     CAPTCHA_MAX_TOKENS, nếu không <think> ăn hết → trả rỗng).
+- CAPTCHA_TEMPERATURE (0.7) / CAPTCHA_TOP_P (0.8) / CAPTCHA_TOP_K (20) /
+  CAPTCHA_MIN_P (0.0) / CAPTCHA_PRESENCE_PENALTY (0.0) / CAPTCHA_REPETITION_PENALTY (1.0).
+  (presence_penalty để 0.0 thay vì 1.5 của preset gốc — captcha có thể lặp ký tự.)
 """
 
 from __future__ import annotations
@@ -32,14 +51,69 @@ from openai import OpenAI
 
 _log = logging.getLogger(__name__)
 
-_CAPTCHA_MODEL = os.getenv("CAPTCHA_MODEL", "gpt-4o")
+# Model + endpoint MẶC ĐỊNH = Qwen self-host nội bộ. YAML KHÔNG đè model nữa
+# (solve_captcha bỏ qua step.vision_model) — model chỉ từ env CAPTCHA_MODEL này.
+_CAPTCHA_MODEL = os.getenv("CAPTCHA_MODEL", "Qwen/Qwen3.5-27B-FP8")
 _CAPTCHA_TIMEOUT = int(os.getenv("CAPTCHA_TIMEOUT", "30"))
 _CAPTCHA_MAX_TOKENS = int(os.getenv("CAPTCHA_MAX_TOKENS", "24"))
+# Endpoint OpenAI-compatible. Default = Qwen vLLM nội bộ; env override khi đổi server.
+# Endpoint KHÔNG phải secret; KEY thì vẫn chỉ từ env (không hardcode, không log).
+# Đặt CAPTCHA_BASE_URL="" để quay lại OpenAI chính chủ.
+_CAPTCHA_BASE_URL = os.getenv("CAPTCHA_BASE_URL", "http://124.197.18.58/vllm/v1").strip()
+_CAPTCHA_API_KEY = os.getenv("CAPTCHA_API_KEY", "").strip()
+# Captcha thực ~4-8 ký tự; quá dài = câu giải thích/từ chối → loại.
+_CAPTCHA_MAX_LEN = int(os.getenv("CAPTCHA_MAX_LEN", "12"))
+
+
+def _envf(name: str, default: float) -> float:
+    """Đọc env float; trống/sai → default."""
+    v = os.getenv(name, "").strip()
+    try:
+        return float(v) if v else default
+    except ValueError:
+        return default
+
+
+# Sampling cho server SELF-HOST (vLLM/Qwen) — chỉ áp dụng khi CAPTCHA_BASE_URL set
+# (OpenAI chính chủ giữ greedy temperature=0). Mặc định = preset Qwen "non-thinking,
+# general" NHƯNG presence_penalty=0.0 (khác gốc 1.5) vì captcha có thể LẶP ký tự,
+# không nên phạt lặp. top_k/min_p/repetition_penalty không phải param chuẩn OpenAI
+# → gửi qua extra_body của vLLM.
+_CAPTCHA_TEMPERATURE = _envf("CAPTCHA_TEMPERATURE", 0.7)
+_CAPTCHA_TOP_P = _envf("CAPTCHA_TOP_P", 0.8)
+_CAPTCHA_TOP_K = int(_envf("CAPTCHA_TOP_K", 20))
+_CAPTCHA_MIN_P = _envf("CAPTCHA_MIN_P", 0.0)
+_CAPTCHA_PRESENCE_PENALTY = _envf("CAPTCHA_PRESENCE_PENALTY", 0.0)
+_CAPTCHA_REPETITION_PENALTY = _envf("CAPTCHA_REPETITION_PENALTY", 1.0)
+# Suy luận (thinking): MẶC ĐỊNH TẮT cho OCR. OCR là nhận dạng, không cần reasoning;
+# bật thinking sẽ khiến <think> ăn hết CAPTCHA_MAX_TOKENS (24) → trả rỗng. Muốn bật:
+# CAPTCHA_THINKING=1 VÀ tăng CAPTCHA_MAX_TOKENS lớn (vài trăm) + chấp nhận chậm/tốn.
+_CAPTCHA_THINKING = os.getenv("CAPTCHA_THINKING", "").strip().lower() in ("1", "true", "yes", "on")
 
 # Captcha alphanumeric — loại bỏ mọi ký tự không phải [A-Za-z0-9] khỏi câu trả
 # lời (model đôi khi kèm dấu cách, dấu nháy, hoặc "Đáp án:"). KHÔNG lowercase —
 # captcha thường phân biệt HOA/thường.
 _CLEAN_RE = re.compile(r"[^A-Za-z0-9]")
+# Gỡ block suy luận <think>...</think> phòng khi server vẫn phát (vd thinking bật,
+# hoặc model phát think rỗng) — tránh lọt "think" vào mã.
+_THINK_RE = re.compile(r"<think>.*?</think>", re.S)
+
+# Mẫu câu TỪ CHỐI / GIẢI THÍCH của model (OpenAI siết policy giải captcha; Gemini
+# hiếm hơn nhưng vẫn có thể). Nếu answer chứa các cụm này → KHÔNG phải mã, trả ""
+# để caller reroll/ask-user thay vì điền nhầm câu từ chối (vd "Xin lỗi tôi không
+# thể giúp với việc này" → "Xinlitikhngthgipvivicny") vào ô captcha.
+_REFUSAL_MARKERS = (
+    "xin lỗi", "tôi không thể", "mình không thể", "không thể giúp",
+    "không thể hỗ trợ", "không hỗ trợ", "i'm sorry", "i am sorry",
+    "i cannot", "i can't", "i can not", "i'm not able", "i am not able",
+    "unable to", "cannot assist", "can't help", "as an ai", "i won't",
+)
+
+
+def _looks_like_refusal(answer: str) -> bool:
+    """True nếu answer là câu từ chối/giải thích (không phải mã captcha)."""
+    low = answer.lower()
+    return any(m in low for m in _REFUSAL_MARKERS)
 
 
 def _build_prompt(hint: str, expected_len: int | None, has_hint: bool = False) -> str:
@@ -97,8 +171,17 @@ def read_captcha_text(
             gửi kèm như ẢNH 1 + ảnh hiện tại là ẢNH 2 → GPT-4o biết captcha nằm
             đâu mà đọc (dùng khi không crop được). Lỗi tải ảnh → bỏ qua hint.
     """
-    if not api_key:
-        _log.warning("captcha_solver: api_key trống — skip")
+    # Ưu tiên key RIÊNG cho captcha (CAPTCHA_API_KEY, vd Gemini); fallback key
+    # OpenAI caller truyền vào. Cả 2 đều từ env — không hardcode, không log.
+    use_key = _CAPTCHA_API_KEY or api_key
+    # Server LOCAL (vLLM/Ollama Qwen-VL) trỏ qua CAPTCHA_BASE_URL thường KHÔNG cần
+    # key, nhưng OpenAI client bắt buộc api_key non-empty → đặt placeholder.
+    # (Nếu server bật --api-key thì vẫn set CAPTCHA_API_KEY như bình thường.)
+    if not use_key and _CAPTCHA_BASE_URL:
+        use_key = "EMPTY"
+    if not use_key:
+        _log.warning("captcha_solver: thiếu API key/endpoint "
+                     "(CAPTCHA_API_KEY/CAPTCHA_BASE_URL/OPENAI_API_KEY) — skip")
         return ""
 
     try:
@@ -129,23 +212,66 @@ def read_captcha_text(
     })
 
     try:
-        client = OpenAI(api_key=api_key, timeout=_CAPTCHA_TIMEOUT)
-        resp = client.chat.completions.create(
-            model=use_model,
-            messages=[{"role": "user", "content": content}],
-            max_tokens=_CAPTCHA_MAX_TOKENS,
-            temperature=0,
-        )
+        # base_url chỉ thêm khi có (Qwen self-host/Gemini); trống = OpenAI mặc định.
+        client_kwargs = {"api_key": use_key, "timeout": _CAPTCHA_TIMEOUT}
+        if _CAPTCHA_BASE_URL:
+            client_kwargs["base_url"] = _CAPTCHA_BASE_URL
+        client = OpenAI(**client_kwargs)
+
+        if _CAPTCHA_BASE_URL:
+            # SELF-HOST (vLLM/Qwen): sampling đầy đủ theo khuyến nghị Qwen.
+            # top_k/min_p/repetition_penalty + enable_thinking KHÔNG phải param
+            # chuẩn OpenAI → đưa qua extra_body (vLLM nhận). Tắt thinking cho OCR.
+            extra_body = {
+                "top_k": _CAPTCHA_TOP_K,
+                "min_p": _CAPTCHA_MIN_P,
+                "repetition_penalty": _CAPTCHA_REPETITION_PENALTY,
+                "chat_template_kwargs": {"enable_thinking": _CAPTCHA_THINKING},
+            }
+            resp = client.chat.completions.create(
+                model=use_model,
+                messages=[{"role": "user", "content": content}],
+                max_tokens=_CAPTCHA_MAX_TOKENS,
+                temperature=_CAPTCHA_TEMPERATURE,
+                top_p=_CAPTCHA_TOP_P,
+                presence_penalty=_CAPTCHA_PRESENCE_PENALTY,
+                extra_body=extra_body,
+            )
+        else:
+            # OpenAI chính chủ: greedy đơn giản (gpt-4o ổn với temperature=0).
+            resp = client.chat.completions.create(
+                model=use_model,
+                messages=[{"role": "user", "content": content}],
+                max_tokens=_CAPTCHA_MAX_TOKENS,
+                temperature=0,
+            )
         answer = (resp.choices[0].message.content or "").strip()
     except Exception as e:
+        # KHÔNG log key/base_url — chỉ loại lỗi + message SDK.
         _log.warning("captcha_solver: API call fail (%s): %s",
                      type(e).__name__, e)
+        return ""
+
+    # Gỡ block <think> nếu server phát (thinking bật, hoặc think rỗng).
+    answer = _THINK_RE.sub("", answer).strip()
+
+    # Model từ chối/giải thích → KHÔNG nhận làm mã (tránh false-positive như
+    # "Xinlitikhngthgipvivicny"). Caller sẽ reroll/escalate/ask-user.
+    if _looks_like_refusal(answer):
+        _log.info("captcha_solver: model TỪ CHỐI/giải thích (model=%s, raw=%r) "
+                  "— coi là fail", use_model, answer[:80])
         return ""
 
     code = _CLEAN_RE.sub("", answer)
     if not code:
         _log.info("captcha_solver: model trả rỗng/không đọc được (raw=%r)",
                   answer[:60])
+        return ""
+    # Quá dài = câu giải thích/từ chối lọt lưới marker → loại.
+    if len(code) > _CAPTCHA_MAX_LEN:
+        _log.info("captcha_solver: kết quả dài bất thường %d ký tự (>%d) — nghi "
+                  "câu giải thích/từ chối, coi là fail (raw=%r)",
+                  len(code), _CAPTCHA_MAX_LEN, answer[:80])
         return ""
 
     _log.info("captcha_solver: đọc được %d ký tự (model=%s)",

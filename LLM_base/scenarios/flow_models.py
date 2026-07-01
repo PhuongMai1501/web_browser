@@ -156,11 +156,11 @@ class FlowStep(BaseModel):
     verify_fail_any: Optional[list[str]] = None   # text site hiện khi mã SAI
     verify_success_any: Optional[list[str]] = None  # text báo chắc chắn ĐÚNG (optional)
     max_attempts: int = 4                         # số lần OCR+verify tối đa
-    vision_model: Optional[str] = None            # model MẠNH dùng khi escalate (vd gpt-4o)
-    vision_model_cheap: Optional[str] = None      # model RẺ thử trước (vd gpt-4o-mini);
-                                                  # None → dùng vision_model luôn (không escalate)
-    cheap_attempts: Optional[int] = None          # số lần đầu dùng model rẻ trước khi
-                                                  # escalate sang vision_model (default 2)
+    # DEPRECATED (2026-06-25): model OCR do env CAPTCHA_MODEL quyết, YAML KHÔNG đè
+    # nữa. 3 field dưới GIỮ để YAML cũ không vỡ khi parse, nhưng solve_captcha BỎ QUA.
+    vision_model: Optional[str] = None            # [ignored] dùng env CAPTCHA_MODEL
+    vision_model_cheap: Optional[str] = None      # [ignored]
+    cheap_attempts: Optional[int] = None          # [ignored]
     crop_selector: Optional[str] = None           # CSS selector ảnh captcha để crop
     captcha_src_selector: Optional[str] = None     # CSS selector <img> captcha — lấy
                                                    # THẲNG src (data URI base64) → OCR ảnh
@@ -169,6 +169,10 @@ class FlowStep(BaseModel):
     captcha_image_hint: Optional[str] = None      # URL ảnh khoanh đỏ vùng captcha —
                                                   # gửi kèm cho GPT-4o làm tham chiếu vị
                                                   # trí khi auto-crop không cắt được
+    fail_code: Optional[str] = None               # solve_captcha: mã lỗi trả về khi
+                                                  # OCR fail hết max_attempts (vd
+                                                  # "WRONG_CAPTCHA"). None → chuỗi lỗi cũ.
+    fail_message: Optional[str] = None            # message đi kèm fail_code
     manual_only: bool = False                     # solve_captcha: chỉ tiêu thụ mã user
                                                   # nhập (context[field]); rỗng → no-op.
                                                   # Dùng cho step sau ask_user.
